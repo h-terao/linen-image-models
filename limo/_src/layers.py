@@ -30,13 +30,15 @@ def Dense(
 
 def Conv(
     features: int,
-    kernel_size: tp.Sequence[int],
+    kernel_size: int | tp.Sequence[int],
     stride: int | tp.Sequence[int] = 1,
     dilation: int | tp.Sequence[int] = 1,
     groups: int = 1,
     bias: bool = False,
     name: str | None = None,
 ) -> linen.Conv:
+    if isinstance(kernel_size, int):
+        kernel_size = (kernel_size, kernel_size)
     num_spatial_dims = len(kernel_size)
 
     if isinstance(stride, int):
@@ -278,16 +280,24 @@ class GELUTanh(linen.Module):
 #
 #  Experimental layers.
 #
+class TanhExp(linen.Module):
+    """TanhExp layer.
+
+    Paper: TanhExp: A smooth activation function with high convergence speed for
+        lightweight neural networks - arXiv:2003.09855
+    """
+
+    def __call__(self, x: chex.Array) -> chex.Array:
+        return x * jnp.tanh(jnp.exp(x))
+
+
 class FReLU(linen.Module):
     """Funnel activation or FReLU layer.
 
-    Paper: Funnel Activation for Visual Recognition - https://arxiv.org/abs/2007.11824
+    Paper: Funnel Activation for Visual Recognition - arxiv:2007.11824
 
     Args:
         kernel_size: Kernel size of funnel condition.
-
-    Returns:
-        Activated array.
     """
 
     kernel_size: tp.Sequence[int]

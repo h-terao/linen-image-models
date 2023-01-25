@@ -20,5 +20,6 @@ from ._src.layers import (
     HardMish,
     GELU,
     GELUTanh,
+    TanhExp,
     FReLU,
 )

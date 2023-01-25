@@ -216,7 +216,13 @@ def load_weights_from_torch_model(variables: tp.Mapping, torch_model: nn.Module)
             flax_param_flat = traverse_util.flatten_dict(flax_param)
             for k in new_variable_flat:
                 if new_variable_flat[k].shape != flax_param_flat[k].shape:
-                    warnings.warn(f"Shape mismatch is found: {k} in {torch_key}")
+                    msg = (
+                        f"Shape mismatch is found in {k} of {torch_key}. "
+                        f"Expected: {new_variable_flat[k].shape}, "
+                        f"Actual: {flax_param_flat[k].shape}."
+                    )
+
+                    warnings.warn(msg)
                     new_variable_flat[k] = flax_param_flat[k]
             new_variable = traverse_util.unflatten_dict(new_variable_flat)
         else:
