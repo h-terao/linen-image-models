@@ -6,6 +6,7 @@ import warnings
 
 import torch
 import torch.nn as nn
+import timm
 import jax.numpy as jnp
 from flax import core, traverse_util
 import chex
@@ -129,8 +130,25 @@ def load_weights_from_torch_model(variables: tp.Mapping, torch_model: nn.Module)
     return new_variables
 
 
-def save():
-    pass
+def worker(pattern):
+    """Download models, and save"""
+    models = list_models(pattern)
+    for model in models:
+        for pretrained in x:
+            checkpoint_path = f"weights/{model}.{pretrained}.ckpt"
+
+            torch_model = timm.create_model(model, pretrained=pretrained)
+            flax_model = limo.create_model(model)
+
+            #
+            variables = flax_model.init()
+            variables = load_weights_from_torch_model(variables, torch_model)
+
+            # In actual,
+            # variables = limo.load_model(model, pretrained)
+
+            if torch_features == flax_features:
+                # save.
 
 
 if __name__ == "__main__":

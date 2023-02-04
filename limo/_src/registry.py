@@ -1,24 +1,24 @@
 from __future__ import annotations
 import typing as tp
+from collections import defaultdict
 
 
-_registry = {}
+_registry = defaultdict(dict)
 
 
-def register_model(fun: tp.Callable | None = None, /, **kwargs):
+class ModelSpec(tp.NamedTuple):
+    builder: tp.Callable
+    pretrained: str
+    default: bool
+
+
+def register_model(
+    model_name: str, model_builder: tp.Callable, pretrained: str, default: bool = False, **kwargs
+):
     """
     Args:
         name: Model name to register.
         model_builder: A callable that creates model.
 
     """
-    if callable(fun):
-        _registry[fun.__name__] = fun
-
-    else:
-
-        def deco(fun):
-            register_model(fun, **kwargs)
-            return fun
-
-        return deco
+    _registry[model_name] = ModelSpec(model_builder, pretrained, default)

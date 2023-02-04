@@ -10,6 +10,7 @@ import chex
 from limo import layers
 from limo import ModuleDef
 from limo import register_model
+from limo import using_config
 
 # uncomment when you do not register model.
 # from limo import dummy_register_model as register_model
@@ -192,48 +193,50 @@ class EfficientNet(linen.Module):
     conv_layer: ModuleDef = layers.Conv
     norm_layer: ModuleDef = layers.BatchNorm
     act_layer: ModuleDef = layers.SiLU
+    torch_like: bool = False
 
     @linen.compact
-    def __call__(self, x: chex.Array) -> chex.Array:
-        x = self.conv_layer(self.stem_size, 3, 2, name="conv_stem")(x)
-        x = self.norm_layer(name="bn1")(x)
-        x = self.act_layer(name="bn1.act")(x)
+    def __call__(self, x: chex.Array, is_training: bool = False) -> chex.Array:
+        with using_config(train=is_training, torch_like=self.torch_like):
+            x = self.conv_layer(self.stem_size, 3, 2, name="conv_stem")(x)
+            x = self.norm_layer(name="bn1")(x)
+            x = self.act_layer(name="bn1.act")(x)
 
-        total_blocks = sum(x.num_blocks for x in self.stage_specs)
-        block_idx = 0
-        for i, stage_spec in enumerate(self.stage_specs):
-            kwargs = {
-                "features": stage_spec.features,
-                "dw_kernel_size": stage_spec.kernel_size,
-                "se_ratio": stage_spec.se_ratio,
-                "conv_layer": self.conv_layer,
-                "norm_layer": self.norm_layer,
-                "act_layer": self.act_layer,
-                "no_skip": stage_spec.no_skip,
-            }
+            total_blocks = sum(x.num_blocks for x in self.stage_specs)
+            block_idx = 0
+            for i, stage_spec in enumerate(self.stage_specs):
+                kwargs = {
+                    "features": stage_spec.features,
+                    "dw_kernel_size": stage_spec.kernel_size,
+                    "se_ratio": stage_spec.se_ratio,
+                    "conv_layer": self.conv_layer,
+                    "norm_layer": self.norm_layer,
+                    "act_layer": self.act_layer,
+                    "no_skip": stage_spec.no_skip,
+                }
 
-            # Some blocks need to modify args.
-            if stage_spec.block == InvertedResidual:
-                kwargs["exp_ratio"] = stage_spec.exp_ratio
+                # Some blocks need to modify args.
+                if stage_spec.block == InvertedResidual:
+                    kwargs["exp_ratio"] = stage_spec.exp_ratio
 
-            for j in range(stage_spec.num_blocks):
-                x = stage_spec.block(
-                    stride=stage_spec.stride if j == 0 else 1,
-                    drop_path_rate=self.drop_path_rate * block_idx / total_blocks,
-                    **kwargs,
-                    name=f"blocks.{i}.{j}",
-                )(x)
-                block_idx += 1
+                for j in range(stage_spec.num_blocks):
+                    x = stage_spec.block(
+                        stride=stage_spec.stride if j == 0 else 1,
+                        drop_path_rate=self.drop_path_rate * block_idx / total_blocks,
+                        **kwargs,
+                        name=f"blocks.{i}.{j}",
+                    )(x)
+                    block_idx += 1
 
-        x = self.conv_layer(self.features, 1, name="conv_head")(x)
-        x = self.norm_layer(name="bn2")(x)
-        x = self.act_layer(name="bn2.act")(x)
+            x = self.conv_layer(self.features, 1, name="conv_head")(x)
+            x = self.norm_layer(name="bn2")(x)
+            x = self.act_layer(name="bn2.act")(x)
 
-        x = jnp.mean(x, axis=(-2, -3))  # GAP
-        if self.num_classes > 0:
-            x = layers.Dropout(self.drop_rate)(x)
-            x = layers.Dense(self.num_classes, name="classifier")(x)
-        return x
+            x = jnp.mean(x, axis=(-2, -3))  # GAP
+            if self.num_classes > 0:
+                x = layers.Dropout(self.drop_rate)(x)
+                x = layers.Dense(self.num_classes, name="classifier")(x)
+            return x
 
 
 def _efficientnet(feature_multiplier, depth_multiplier, drop_rate):
@@ -277,12 +280,6 @@ def _efficientnet(feature_multiplier, depth_multiplier, drop_rate):
     return model_maker
 
 
-@register_model()
-def efficientnet_b0(**kwargs):
-    drop_rate = kwargs.pop("drop_rate", 0.2)
-    return _efficientnet(feature_multiplier=1.0, depth_multiplier=1.0, drop_rate=0.2)
-
-
 efficientnet_b0 = _efficientnet(feature_multiplier=1.0, depth_multiplier=1.0, drop_rate=0.2)
 efficientnet_b1 = _efficientnet(feature_multiplier=1.0, depth_multiplier=1.1, drop_rate=0.2)
 efficientnet_b2 = _efficientnet(feature_multiplier=1.1, depth_multiplier=1.2, drop_rate=0.3)
@@ -292,3 +289,7 @@ efficientnet_b5 = _efficientnet(feature_multiplier=1.6, depth_multiplier=2.2, dr
 efficientnet_b6 = _efficientnet(feature_multiplier=1.8, depth_multiplier=2.6, drop_rate=0.5)
 efficientnet_b7 = _efficientnet(feature_multiplier=2.0, depth_multiplier=3.1, drop_rate=0.5)
 efficientnet_b8 = _efficientnet(feature_multiplier=2.2, depth_multiplier=3.6, drop_rate=0.5)
+
+
+# If you falk this file, remove the below section.
+register_model("efficientnet_b0", efficientnet_b0, pretrained="in1k", default=True)
