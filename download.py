@@ -129,8 +129,7 @@ def load_weights_from_torch_model(variables: tp.Mapping, torch_model: nn.Module)
     return new_variables
 
 
-def main():
-
+def save():
     pass
 
 
