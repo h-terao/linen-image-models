@@ -2,7 +2,7 @@
 
 Linen Image Models (limo) aims to port various image models and their pre-trained weights from timm.
 
-## Features
+## Philosophy
 - Easy to use pre-trained model
 - Easy to folk and modify models
 

@@ -1,18 +1,12 @@
 from __future__ import annotations
 import typing as tp
 import dataclasses
-import math
 
 import jax.numpy as jnp
 from flax import linen
 import chex
 
-from limo import layers
-from limo import ModuleDef
-from limo import register_model
-
-# uncomment when you do not register model.
-# from limo import dummy_register_model as register_model
+from limo import layers, ModuleDef
 
 
 def make_divisible(
@@ -236,8 +230,7 @@ class EfficientNet(linen.Module):
         return x
 
 
-def _efficientnet(feature_multiplier, depth_multiplier, drop_rate):
-
+def _tinynet(feature_multiplier, depth_multiplier):
     stage_specs = [
         StageSpec(DepthwiseSeparableConv, 1, 3, 1, 1, 16, 0.25),
         StageSpec(InvertedResidual, 2, 3, 2, 6, 24, 0.25),
@@ -253,20 +246,17 @@ def _efficientnet(feature_multiplier, depth_multiplier, drop_rate):
         dataclasses.replace(
             x,
             features=make_divisible(feature_multiplier * x.features),
-            num_blocks=int(math.ceil(depth_multiplier * x.num_blocks)),
+            num_blocks=max(1, round(depth_multiplier * x.num_blocks)),
         )
         for x in stage_specs
     ]
 
-    stem_size = make_divisible(feature_multiplier * 32)
-    features = 4 * stage_specs[-1].features
+    features = max(1280, make_divisible(1280 * feature_multiplier))
 
-    def model_maker(
-        num_classes: int = 1000, drop_rate: float = drop_rate, drop_path_rate=0.2, **kwargs
-    ):
+    def model_maker(num_classes: int = 1000, drop_rate: float = 0, drop_path_rate=0.2, **kwargs):
         return EfficientNet(
             stage_specs=stage_specs,
-            stem_size=stem_size,
+            stem_size=32,
             features=features,
             num_classes=num_classes,
             drop_rate=drop_rate,
@@ -277,18 +267,8 @@ def _efficientnet(feature_multiplier, depth_multiplier, drop_rate):
     return model_maker
 
 
-@register_model()
-def efficientnet_b0(**kwargs):
-    drop_rate = kwargs.pop("drop_rate", 0.2)
-    return _efficientnet(feature_multiplier=1.0, depth_multiplier=1.0, drop_rate=0.2)
-
-
-efficientnet_b0 = _efficientnet(feature_multiplier=1.0, depth_multiplier=1.0, drop_rate=0.2)
-efficientnet_b1 = _efficientnet(feature_multiplier=1.0, depth_multiplier=1.1, drop_rate=0.2)
-efficientnet_b2 = _efficientnet(feature_multiplier=1.1, depth_multiplier=1.2, drop_rate=0.3)
-efficientnet_b3 = _efficientnet(feature_multiplier=1.2, depth_multiplier=1.4, drop_rate=0.3)
-efficientnet_b4 = _efficientnet(feature_multiplier=1.4, depth_multiplier=1.8, drop_rate=0.4)
-efficientnet_b5 = _efficientnet(feature_multiplier=1.6, depth_multiplier=2.2, drop_rate=0.4)
-efficientnet_b6 = _efficientnet(feature_multiplier=1.8, depth_multiplier=2.6, drop_rate=0.5)
-efficientnet_b7 = _efficientnet(feature_multiplier=2.0, depth_multiplier=3.1, drop_rate=0.5)
-efficientnet_b8 = _efficientnet(feature_multiplier=2.2, depth_multiplier=3.6, drop_rate=0.5)
+tinynet_a = _tinynet(feature_multiplier=1.0, depth_multiplier=1.2)
+tinynet_b = _tinynet(feature_multiplier=0.75, depth_multiplier=1.1)
+tinynet_c = _tinynet(feature_multiplier=0.54, depth_multiplier=0.85)
+tinynet_d = _tinynet(feature_multiplier=0.54, depth_multiplier=0.695)
+tinynet_e = _tinynet(feature_multiplier=0.51, depth_multiplier=0.6)
