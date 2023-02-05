@@ -2,6 +2,37 @@
 
 Linen Image Models (limo) aims to port various image models and their pre-trained weights from timm.
 
+## Short example
+
+```python
+import jax
+import jax.numpy as jnp
+import jax.random as jr
+import limo
+
+model_names = limo.list_models()
+model_name = model_names[-1]  # Select the last model for example.
+
+# Create a model.
+flax_model, model_cfg = limo.create_model(model_name, pretrained=True)
+
+# Prepare variables.
+variables = flax_model.init(jr.PRNGKey(0), jnp.zeros(model_cfg["input_size"]))
+variables = limo.load_weights(variables, model_name, pretrained=True)
+state, params = variables.pop("params")
+```
+
+## Policy
+
+### Easy to use various models with pre-trained weights.
+
+
+### Easy to folk and customize models.
+
+In Flax, module insertion, replacing or deleting is very difficult.
+
+
+
 ## Example
 
 ```python

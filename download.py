@@ -1,11 +1,14 @@
 """Download pre-trained weights from timm."""
 from __future__ import annotations
+import os
 import typing as tp
 from pathlib import Path
 import pickle
 import argparse
 import warnings
+from functools import partial
 
+import numpy
 import torch
 import torch.nn as nn
 import timm
@@ -15,9 +18,9 @@ from flax import core, traverse_util
 import chex
 
 import limo
-from limo import list_models
 
 
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 SEP = "/"  # sep char that is not used in layer name of flax and pytorch.
 
 
@@ -131,9 +134,21 @@ def load_torch_state(variables: tp.Mapping, torch_model: nn.Module) -> tp.Mappin
     return new_variables
 
 
-def assert_equal(flax_model, torch_model, array):
-    tensor = torch.from_numpy(array)
-    tensor = tensor.permute(2, 0, 1)  # HWC -> CHW
+@torch.no_grad()
+@partial(limo.configure, train=False)
+def assert_equal(flax_model, torch_model, variables, array):
+    # Forward Flax model.
+    logits_flax = flax_model.apply(variables, array)
+
+    # Forward PyTorch model.
+    tensor = torch.from_numpy(numpy.array(array))
+    tensor = tensor.permute(0, 3, 1, 2)  # NHWC -> NCHW
+    torch_model.eval()
+    logits_torch = torch_model(tensor)
+    logits_torch = jnp.array(logits_torch.detach().cpu().numpy())
+
+    distance = float(jnp.sum(jnp.abs(logits_torch - logits_flax), axis=-1).mean())
+    assert jnp.allclose(logits_flax, logits_torch, rtol=1.0, atol=1e-5), f"Difference: {distance}"
 
 
 def download_model(save_dir, model_name, pretrained, force: bool = False):
@@ -142,55 +157,35 @@ def download_model(save_dir, model_name, pretrained, force: bool = False):
     save_dir_path.mkdir(parents=True, exist_ok=True)
     model_path = save_dir_path / f"{model_name}.{pretrained}.ckpt"
     if force or not model_path.exists():
+        print(f"Downloading {model_name}.{pretrained}")
         torch_model = timm.create_model(model_name, pretrained)
-        flax_model = limo.create_model(model_name, pretrained)
+        flax_model, model_cfg = limo.create_model(model_name, pretrained, True)
 
-        input_size = torch_model.default_cfg["input_size"]
-        input_size = (4, *input_size[1:], input_size[0])  # CHW -> NHWC
+        # TODO: check cfg is correct.
+        input_size = (4, *model_cfg.get("input_size", (224, 224, 3)))
 
         input = jnp.zeros(input_size, dtype=jnp.float32)
         variables = flax_model.init(jr.PRNGKey(0), input)
         variables = load_torch_state(variables, torch_model)
 
-        assert_equal(flax_model, torch_model, input)
-
+        assert_equal(flax_model, torch_model, variables, input)
         model_path.write_bytes(pickle.dumps(variables))
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("name", default=None, type=str, required=False, help="")
+    parser.add_argument("-n", "--name", default=None, type=str, help="")
     parser.add_argument("-o", "--out", default="weights", help="Output directory.")
     parser.add_argument("-f", "--force", action="store_true", help="Reinstall download.")
     args = parser.parse_args()
 
-    for model_name in limo.list_models():
+    for model_name in limo.list_models(args.name, pretrained=True):
         for pretrained in limo.list_pretrained(model_name):
             try:
                 download_model(args.out, model_name, pretrained)
-            except AssertionError:
-                print(f"{}")
-
-
-# def worker(pattern):
-#     """Download models, and save"""
-#     models = list_models(pattern)
-#     for model in models:
-#         for pretrained in x:
-#             checkpoint_path = f"weights/{model}.{pretrained}.ckpt"
-
-#             torch_model = timm.create_model(model, pretrained=pretrained)
-#             flax_model = limo.create_model(model)
-
-#             #
-#             variables = flax_model.init()
-#             variables = load_weights_from_torch_model(variables, torch_model)
-
-#             # In actual,
-#             # variables = limo.load_model(model, pretrained)
-
-#             if torch_features == flax_features:
-#                 # save.
+            except AssertionError as e:
+                print(f"Failed to download {model_name}.{pretrained}")
+                print(e)
 
 
 if __name__ == "__main__":

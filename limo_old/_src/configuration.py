@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import functools
 import contextlib
 import threading
+import inspect
 
 import jax.numpy as jnp
 import chex
@@ -16,6 +17,7 @@ class LocalConfig(threading.local):
     dtype: chex.ArrayDType = jnp.float32
     norm_dtype: chex.ArrayDType | None = None
     axis_name: str | None = None
+    torch_like: bool = True
 
     def get(self, name: str) -> tp.Any:
         v = getattr(self, name)
