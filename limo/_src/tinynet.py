@@ -6,7 +6,15 @@ import jax.numpy as jnp
 from flax import linen
 import chex
 
-from limo import layers, ModuleDef
+from limo import (
+    layers,
+    register_model,
+    using_config,
+    IMAGENET_DEFAULT_MEAN,
+    IMAGENET_DEFAULT_STD,
+)
+
+ModuleDef = tp.Any
 
 
 def make_divisible(
@@ -174,7 +182,7 @@ class StageSpec:
     no_skip: bool = False
 
 
-class EfficientNet(linen.Module):
+class TinyNet(linen.Module):
     stage_specs: tp.Sequence[StageSpec]
     stem_size: int
     features: int
@@ -186,48 +194,50 @@ class EfficientNet(linen.Module):
     conv_layer: ModuleDef = layers.Conv
     norm_layer: ModuleDef = layers.BatchNorm
     act_layer: ModuleDef = layers.SiLU
+    torch_like: bool = True
 
     @linen.compact
     def __call__(self, x: chex.Array) -> chex.Array:
-        x = self.conv_layer(self.stem_size, 3, 2, name="conv_stem")(x)
-        x = self.norm_layer(name="bn1")(x)
-        x = self.act_layer(name="bn1.act")(x)
+        with using_config(torch_like=self.torch_like):
+            x = self.conv_layer(self.stem_size, 3, 2, name="conv_stem")(x)
+            x = self.norm_layer(name="bn1")(x)
+            x = self.act_layer(name="bn1.act")(x)
 
-        total_blocks = sum(x.num_blocks for x in self.stage_specs)
-        block_idx = 0
-        for i, stage_spec in enumerate(self.stage_specs):
-            kwargs = {
-                "features": stage_spec.features,
-                "dw_kernel_size": stage_spec.kernel_size,
-                "se_ratio": stage_spec.se_ratio,
-                "conv_layer": self.conv_layer,
-                "norm_layer": self.norm_layer,
-                "act_layer": self.act_layer,
-                "no_skip": stage_spec.no_skip,
-            }
+            total_blocks = sum(x.num_blocks for x in self.stage_specs)
+            block_idx = 0
+            for i, stage_spec in enumerate(self.stage_specs):
+                kwargs = {
+                    "features": stage_spec.features,
+                    "dw_kernel_size": stage_spec.kernel_size,
+                    "se_ratio": stage_spec.se_ratio,
+                    "conv_layer": self.conv_layer,
+                    "norm_layer": self.norm_layer,
+                    "act_layer": self.act_layer,
+                    "no_skip": stage_spec.no_skip,
+                }
 
-            # Some blocks need to modify args.
-            if stage_spec.block == InvertedResidual:
-                kwargs["exp_ratio"] = stage_spec.exp_ratio
+                # Some blocks need to modify args.
+                if stage_spec.block == InvertedResidual:
+                    kwargs["exp_ratio"] = stage_spec.exp_ratio
 
-            for j in range(stage_spec.num_blocks):
-                x = stage_spec.block(
-                    stride=stage_spec.stride if j == 0 else 1,
-                    drop_path_rate=self.drop_path_rate * block_idx / total_blocks,
-                    **kwargs,
-                    name=f"blocks.{i}.{j}",
-                )(x)
-                block_idx += 1
+                for j in range(stage_spec.num_blocks):
+                    x = stage_spec.block(
+                        stride=stage_spec.stride if j == 0 else 1,
+                        drop_path_rate=self.drop_path_rate * block_idx / total_blocks,
+                        **kwargs,
+                        name=f"blocks.{i}.{j}",
+                    )(x)
+                    block_idx += 1
 
-        x = self.conv_layer(self.features, 1, name="conv_head")(x)
-        x = self.norm_layer(name="bn2")(x)
-        x = self.act_layer(name="bn2.act")(x)
+            x = self.conv_layer(self.features, 1, name="conv_head")(x)
+            x = self.norm_layer(name="bn2")(x)
+            x = self.act_layer(name="bn2.act")(x)
 
-        x = jnp.mean(x, axis=(-2, -3))  # GAP
-        if self.num_classes > 0:
-            x = layers.Dropout(self.drop_rate)(x)
-            x = layers.Dense(self.num_classes, name="classifier")(x)
-        return x
+            x = jnp.mean(x, axis=(-2, -3))  # GAP
+            if self.num_classes > 0:
+                x = layers.Dropout(self.drop_rate)(x)
+                x = layers.Dense(self.num_classes, name="classifier")(x)
+            return x
 
 
 def _tinynet(feature_multiplier, depth_multiplier):
@@ -254,7 +264,7 @@ def _tinynet(feature_multiplier, depth_multiplier):
     features = max(1280, make_divisible(1280 * feature_multiplier))
 
     def model_maker(num_classes: int = 1000, drop_rate: float = 0, drop_path_rate=0.2, **kwargs):
-        return EfficientNet(
+        return TinyNet(
             stage_specs=stage_specs,
             stem_size=32,
             features=features,
@@ -272,3 +282,53 @@ tinynet_b = _tinynet(feature_multiplier=0.75, depth_multiplier=1.1)
 tinynet_c = _tinynet(feature_multiplier=0.54, depth_multiplier=0.85)
 tinynet_d = _tinynet(feature_multiplier=0.54, depth_multiplier=0.695)
 tinynet_e = _tinynet(feature_multiplier=0.51, depth_multiplier=0.6)
+
+
+_cfg = {
+    "input_size": (224, 224, 3),
+    "crop_mode": None,
+    "crop_pct": 0.875,
+    "interpolation": "bicubic",
+    "mean": IMAGENET_DEFAULT_MEAN,
+    "std": IMAGENET_DEFAULT_STD,
+}
+
+register_model(
+    "tinynet_a",
+    tinynet_a,
+    checkpoint_name="in1k",
+    default_cfg=dict(_cfg, input_size=(192, 192, 3)),
+    default_checkpoint=True,
+)
+
+register_model(
+    "tinynet_b",
+    tinynet_b,
+    checkpoint_name="in1k",
+    default_cfg=dict(_cfg, input_size=(188, 188, 3)),
+    default_checkpoint=True,
+)
+
+register_model(
+    "tinynet_c",
+    tinynet_c,
+    checkpoint_name="in1k",
+    default_cfg=dict(_cfg, input_size=(184, 184, 3)),
+    default_checkpoint=True,
+)
+
+register_model(
+    "tinynet_d",
+    tinynet_d,
+    checkpoint_name="in1k",
+    default_cfg=dict(_cfg, input_size=(152, 152, 3)),
+    default_checkpoint=True,
+)
+
+register_model(
+    "tinynet_e",
+    tinynet_e,
+    checkpoint_name="in1k",
+    default_cfg=dict(_cfg, input_size=(106, 106, 3)),
+    default_checkpoint=True,
+)

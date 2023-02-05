@@ -1,19 +1,18 @@
 from __future__ import annotations
 import typing as tp
 import dataclasses
+from functools import partial
 import math
 
 import jax.numpy as jnp
 from flax import linen
 import chex
 
+import limo
 from limo import layers
-from limo import ModuleDef
-from limo import register_model
-from limo import using_config
 
-# uncomment when you do not register model.
-# from limo import dummy_register_model as register_model
+
+ModuleDef = tp.Any
 
 
 def make_divisible(
@@ -182,6 +181,12 @@ class StageSpec:
 
 
 class EfficientNet(linen.Module):
+    """
+    Args:
+        torch_like: If True, use PyTorch-like padding approach
+            in conv and pooling layers.
+    """
+
     stage_specs: tp.Sequence[StageSpec]
     stem_size: int
     features: int
@@ -193,11 +198,12 @@ class EfficientNet(linen.Module):
     conv_layer: ModuleDef = layers.Conv
     norm_layer: ModuleDef = layers.BatchNorm
     act_layer: ModuleDef = layers.SiLU
-    torch_like: bool = False
+
+    torch_like: bool = True
 
     @linen.compact
-    def __call__(self, x: chex.Array, is_training: bool = False) -> chex.Array:
-        with using_config(train=is_training, torch_like=self.torch_like):
+    def __call__(self, x: chex.Array) -> chex.Array:
+        with limo.using_config(torch_like=self.torch_like):
             x = self.conv_layer(self.stem_size, 3, 2, name="conv_stem")(x)
             x = self.norm_layer(name="bn1")(x)
             x = self.act_layer(name="bn1.act")(x)
@@ -291,5 +297,91 @@ efficientnet_b7 = _efficientnet(feature_multiplier=2.0, depth_multiplier=3.1, dr
 efficientnet_b8 = _efficientnet(feature_multiplier=2.2, depth_multiplier=3.6, drop_rate=0.5)
 
 
-# If you falk this file, remove the below section.
-register_model("efficientnet_b0", efficientnet_b0, pretrained="in1k", default=True)
+#
+#  If you falk this file, remove the below section.
+#
+_cfg = {
+    "input_size": (224, 224, 3),
+    "crop_mode": None,
+    "crop_pct": 0.875,
+    "interpolation": "bicubic",
+    "mean": limo.IMAGENET_DEFAULT_MEAN,
+    "std": limo.IMAGENET_DEFAULT_STD,
+    "torch_like": True,
+}
+
+limo.register_model(
+    "efficientnet_b0",
+    efficientnet_b0,
+    checkpoint_name="ra_in1k",
+    default_cfg=_cfg,
+    default_checkpoint=True,
+)
+
+limo.register_model(
+    "efficientnet_b1",
+    efficientnet_b1,
+    checkpoint_name="ft_in1k",
+    default_cfg=dict(_cfg, test_input_size=(256, 256, 3), crop_pct=1.0),
+    default_checkpoint=True,
+)
+
+limo.register_model(
+    "efficientnet_b2",
+    efficientnet_b2,
+    checkpoint_name="ra_in1k",
+    default_cfg=dict(_cfg, input_size=(256, 256, 3), test_input_size=(288, 288, 3), crop_pct=1.0),
+    default_checkpoint=True,
+)
+
+limo.register_model(
+    "efficientnet_b3",
+    efficientnet_b3,
+    checkpoint_name="ra2_in1k",
+    default_cfg=dict(_cfg, input_size=(288, 288, 3), test_input_size=(320, 320, 3), crop_pct=1.0),
+    default_checkpoint=True,
+)
+
+limo.register_model(
+    "efficientnet_b4",
+    efficientnet_b4,
+    checkpoint_name="ra2_in1k",
+    default_cfg=dict(_cfg, input_size=(320, 320, 3), test_input_size=(384, 384, 3), crop_pct=1.0),
+    default_checkpoint=True,
+)
+
+limo.register_model(
+    "efficientnet_b5",
+    efficientnet_b5,
+    checkpoint_name="in12k_ft_in1k",
+    default_cfg=dict(_cfg, input_size=(448, 448, 3), crop_mode="squash", crop_pct=1.0),
+    default_checkpoint=True,
+)
+
+limo.register_model(
+    "efficientnet_b5",
+    partial(efficientnet_b5, num_classes=11821),
+    checkpoint_name="in12k",
+    default_cfg=dict(_cfg, input_size=(416, 416, 3), crop_pct=0.95),
+)
+
+limo.register_model(
+    "efficientnet_b6",
+    efficientnet_b6,
+    checkpoint_name=None,
+    default_cfg=dict(_cfg, input_size=(528, 528, 3), crop_pct=0.942),
+)
+
+limo.register_model(
+    "efficientnet_b7",
+    efficientnet_b7,
+    checkpoint_name=None,
+    default_cfg=dict(_cfg, input_size=(600, 600, 3), crop_pct=0.949),
+)
+
+limo.register_model(
+    "efficientnet_b8",
+    efficientnet_b8,
+    checkpoint_name=None,
+    default_cfg=dict(_cfg, input_size=(672, 672, 3), crop_pct=0.954),
+)

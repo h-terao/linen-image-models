@@ -60,7 +60,7 @@ def using_config(**configs) -> None:
             setattr(_local_config, key, prev_value)
 
 
-def configure(fun: tp.Callable | None = None, /, **configs) -> tp.Callable:
+def configure(fun: tp.Callable, **configs) -> tp.Callable:
     """Creates a function that configure `fun` using the specified arguments.
     In the configured function, configs are available via `get_config`.
 
@@ -72,20 +72,13 @@ def configure(fun: tp.Callable | None = None, /, **configs) -> tp.Callable:
         A wrapped version of `fun`.
 
     """
-    if callable(fun):
 
-        @functools.wraps(fun)
-        def wrapped(*args, **kwargs):
-            with using_config(**configs):
-                return fun(*args, **kwargs)
+    @functools.wraps(fun)
+    def wrapped(*args, **kwargs):
+        with using_config(**configs):
+            return fun(*args, **kwargs)
 
-        return wrapped
-    else:
-
-        def deco(fun):
-            return configure(fun, **configs)
-
-        return deco
+    return wrapped
 
 
 get_config = _local_config.get
