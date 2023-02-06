@@ -9,8 +9,13 @@ import jax.numpy as jnp
 from flax import linen
 import chex
 
-import limo
 from limo import layers
+from limo import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from limo import register_model, register_pretrained
+
+# Uncomment below two lines if you folk this file.
+# register_model = lambda x, y: y
+# register_variables = lambda *args, **kwargs: None
 
 
 ModuleDef = tp.Any
@@ -164,7 +169,7 @@ class InvertedResidual(linen.Module):
             )(x)
 
         # Point-wise linear projection
-        x = conv_layer(self.features, self.pw_kernel_size, 1, self.torch_like, name="conv_pwl")(x)
+        x = conv_layer(self.features, self.pw_kernel_size, 1, name="conv_pwl")(x)
         x = self.norm_layer(name="bn3")(x)
 
         if x.shape == identity.shape and not self.no_skip:
@@ -238,7 +243,7 @@ class EfficientNet(linen.Module):
                 )(x)
                 block_idx += 1
 
-        x = conv_layer(self.features, 1, self.torch_like, name="conv_head")(x)
+        x = conv_layer(self.features, 1, torch_like=self.torch_like, name="conv_head")(x)
         x = self.norm_layer(name="bn2")(x)
         x = self.act_layer(name="bn2.act")(x)
 
@@ -304,99 +309,87 @@ efficientnet_b8 = _efficientnet(feature_multiplier=2.2, depth_multiplier=3.6, dr
 
 
 #
-#  If you falk this file, remove the below section.
+#  Remove the below section if you folk this file.
 #
+
 _cfg = {
     "num_classes": 1000,
     "input_size": (224, 224, 3),
     "crop_mode": None,
     "crop_pct": 0.875,
     "interpolation": "bicubic",
-    "mean": limo.IMAGENET_DEFAULT_MEAN,
-    "std": limo.IMAGENET_DEFAULT_STD,
-    "torch_like": False,
+    "mean": IMAGENET_DEFAULT_MEAN,
+    "std": IMAGENET_DEFAULT_STD,
+    "torch_like": True,
 }
 
-limo.register_model(
-    "efficientnet_b0",
-    efficientnet_b0,
-    default_cfg=_cfg,
-    checkpoint_name="ra_in1k",
-    default=True,
-)
 
-limo.register_model(
-    "efficientnet_b1",
-    efficientnet_b1,
-    default_cfg=dict(_cfg, test_input_size=(256, 256, 3), crop_pct=1.0),
-    checkpoint_name="ft_in1k",
-    default=True,
+register_model("efficientnet_b0", efficientnet_b0, _cfg)
+register_model(
+    "efficientnet_b1", efficientnet_b1, dict(_cfg, test_input_size=(256, 256, 3), crop_pct=1.0)
 )
-
-limo.register_model(
+register_model(
     "efficientnet_b2",
     efficientnet_b2,
-    default_cfg=dict(_cfg, input_size=(256, 256, 3), test_input_size=(288, 288, 3), crop_pct=1.0),
-    checkpoint_name="ra_in1k",
-    default=True,
+    dict(_cfg, input_size=(256, 256, 3), test_input_size=(288, 288, 3), crop_pct=1.0),
 )
-
-limo.register_model(
+register_model(
     "efficientnet_b3",
     efficientnet_b3,
-    default_cfg=dict(_cfg, input_size=(288, 288, 3), test_input_size=(320, 320, 3), crop_pct=1.0),
-    checkpoint_name="ra2_in1k",
-    default=True,
+    dict(_cfg, input_size=(288, 288, 3), test_input_size=(320, 320, 3), crop_pct=1.0),
 )
-
-limo.register_model(
+register_model(
     "efficientnet_b4",
     efficientnet_b4,
-    default_cfg=dict(_cfg, input_size=(320, 320, 3), test_input_size=(384, 384, 3), crop_pct=1.0),
-    checkpoint_name="ra2_in1k",
-    default=True,
+    dict(_cfg, input_size=(320, 320, 3), test_input_size=(384, 384, 3), crop_pct=1.0),
+)
+register_model(
+    "efficientnet_b5", efficientnet_b5, dict(_cfg, input_size=(456, 456, 3), crop_pct=0.934)
+)
+register_model(
+    "efficientnet_b6", efficientnet_b6, dict(_cfg, input_size=(528, 528, 3), crop_pct=0.942)
+)
+register_model(
+    "efficientnet_b7", efficientnet_b7, dict(_cfg, input_size=(600, 600, 3), crop_pct=0.949)
+)
+register_model(
+    "efficientnet_b8", efficientnet_b8, dict(_cfg, input_size=(672, 672, 3), crop_pct=0.954)
 )
 
 
-limo.register_model(
-    "efficientnet_b5",
-    efficientnet_b5,
-    default_cfg=dict(_cfg, input_size=(456, 456, 3), crop_pct=0.934),
+# Pretrained models come from TIMM.
+# https://github.com/rwightman/pytorch-image-models/blob/main/timm/models/efficientnet.py
+register_pretrained(
+    "efficientnet_b0",
+    "ra_in1k",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118878&authkey=AG9gcJIqTDdSWnU",  # noqa: E501
     default=True,
 )
 
-# limo.register_model(
-#     "efficientnet_b5",
-#     efficientnet_b5,
-#     default_cfg=dict(_cfg, input_size=(448, 448, 3), crop_mode="squash", crop_pct=1.0),
-#     checkpoint_name="in12k_ft_in1k",
-#     default=True,
-# )
-
-# limo.register_model(
-#     "efficientnet_b5",
-#     efficientnet_b5,
-#     default_cfg=dict(_cfg, input_size=(416, 416, 3), crop_pct=0.95, num_classes=11821),
-#     checkpoint_name="in12k",
-# )
-
-limo.register_model(
-    "efficientnet_b6",
-    efficientnet_b6,
-    default_cfg=dict(_cfg, input_size=(528, 528, 3), crop_pct=0.942),
+register_pretrained(
+    "efficientnet_b1",
+    "ft_in1k",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118880&authkey=ABVOTHwmZyMNApU",  # noqa: E501
     default=True,
 )
 
-limo.register_model(
-    "efficientnet_b7",
-    efficientnet_b7,
-    default_cfg=dict(_cfg, input_size=(600, 600, 3), crop_pct=0.949),
+register_pretrained(
+    "efficientnet_b2",
+    "ra_in1k",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118879&authkey=AG98vf1U24xjh4w",  # noqa: E501
     default=True,
 )
 
-limo.register_model(
-    "efficientnet_b8",
-    efficientnet_b8,
-    default_cfg=dict(_cfg, input_size=(672, 672, 3), crop_pct=0.954),
+register_pretrained(
+    "efficientnet_b3",
+    "ra2_in1k",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118881&authkey=AJEJzzKVegOaI1Q",  # noqa: E501
+    default=True,
+)
+
+register_pretrained(
+    "efficientnet_b4",
+    "ra2_in1k",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118886&authkey=AKGpCVHgPtpdGhc",  # noqa: E501
     default=True,
 )

@@ -2,6 +2,12 @@
 
 Linen Image Models (limo) aims to port various image models and their pre-trained weights from timm.
 
+## Design
+
+- Register models from entrypoints
+- Register pretrained params in `registry.py`.
+
+
 ## Short example
 
 ```python

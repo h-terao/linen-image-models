@@ -3,6 +3,7 @@ from ._src.layers import (
     Dense,
     Conv,
     BatchNorm,
+    LayerNorm,
     MaxPool,
     Dropout,
     DropPath,

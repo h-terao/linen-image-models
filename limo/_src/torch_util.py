@@ -1,25 +1,23 @@
-"""Download pre-trained weights from timm."""
+"""A utilities to translate PyTorch parameters into linen-image-models
+
+Note: This module should not be installed
+"""
 from __future__ import annotations
 import os
 import typing as tp
-from pathlib import Path
-import pickle
 import warnings
 from functools import partial
 
 import numpy
+import torch
+import torch.nn as nn
 import jax.numpy as jnp
-import jax.random as jr
 from flax import core, traverse_util
 import chex
 
-import torch
-import torch.nn as nn
-import timm
+from timm.models.convnext import ConvNeXtBlock
 
 import limo
-from limo._src import torch_util
-from limo._src.registry import _checkpoint_registry
 
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
@@ -51,6 +49,15 @@ def _translate(module: nn.Module, tensors: tp.Mapping[str, torch.Tensor]) -> che
             batch_stats["mean"] = tensors["running_mean"].detach().cpu().numpy()
         if "running_var" in tensors:
             batch_stats["var"] = tensors["running_var"].detach().cpu().numpy()
+    elif isinstance(module, nn.LayerNorm):
+        if "weight" in tensors:
+            params["scale"] = tensors["weight"].detach().cpu().numpy()
+        if "bias" in tensors:
+            params["bias"] = tensors["bias"].detach().cpu().numpy()
+
+    elif isinstance(module, ConvNeXtBlock):
+        print("*** LOAD GAMMA ***")
+        params["gamma"] = tensors["gamma"].detach().cpu().numpy()
     else:
         raise ValueError(f"Cannot convert module type {type(module)}.")
 
@@ -108,6 +115,19 @@ def torch2flax(variables: tp.Mapping, torch_model: nn.Module) -> tp.Mapping:
             new_variable_flat = traverse_util.flatten_dict(new_variable)
             flax_param_flat = traverse_util.flatten_dict(flax_param)
             for k in new_variable_flat:
+                if k not in flax_param_flat:
+                    msg = f"{k} is not found."
+                    warnings.warn(msg)
+
+                if (
+                    new_variable_flat[k].ndim == 2
+                    and flax_param_flat[k].ndim == 4
+                    and tuple(flax_param_flat[k].shape[:2]) == (1, 1)
+                ):
+                    # Convert Linear -> Conv1x1.
+                    inC, outC = new_variable_flat[k].shape
+                    new_variable_flat[k] = new_variable_flat[k].reshape(1, 1, inC, outC)
+
                 if new_variable_flat[k].shape != flax_param_flat[k].shape:
                     msg = (
                         f"Shape mismatch is found in {k} of {torch_key}. "
@@ -148,49 +168,30 @@ def assert_equal_preds(flax_model, torch_model, variables, array):
     torch_model.eval()
     logits_torch = torch_model(tensor)
     logits_torch = jnp.array(logits_torch.detach().cpu().numpy())
+    if logits_torch.ndim == 4:
+        # This is image.
+        logits_torch = jnp.transpose(logits_torch, (0, 2, 3, 1))
 
     distance = float(jnp.sum(jnp.abs(logits_torch - logits_flax), axis=-1).mean())
     assert jnp.allclose(logits_flax, logits_torch, rtol=1.0, atol=1e-5), f"Difference: {distance}"
 
 
-def download_model(save_dir, model_name, pretrained, force: bool = False):
-    """"""
-    save_dir_path = Path(save_dir)
-    save_dir_path.mkdir(parents=True, exist_ok=True)
-    model_path = save_dir_path / f"{model_name}.{pretrained}.ckpt"
-    if force or not model_path.exists():
-        print(f"Downloading {model_name}.{pretrained}")
-        torch_model = timm.create_model(model_name, pretrained)
-        flax_model, default_cfg = limo.create_model(model_name, pretrained, mean=0, std=1)
+# def download_model(save_dir, model_name, pretrained, force: bool = False):
+#     """"""
+#     save_dir_path = Path(save_dir)
+#     save_dir_path.mkdir(parents=True, exist_ok=True)
+#     model_path = save_dir_path / f"{model_name}.{pretrained}.ckpt"
+#     if force or not model_path.exists():
+#         print(f"Downloading {model_name}.{pretrained}")
+#         torch_model = timm.create_model(model_name, pretrained)
+#         flax_model, model_cfg = limo.create_model(model_name, pretrained, True)
 
-        input = jr.uniform(
-            jr.PRNGKey(1234),
-            (4, *default_cfg.get("input_size", (224, 224, 3))),
-            dtype=jnp.float32,
-        )
-        variables = flax_model.init(jr.PRNGKey(0), input)
-        variables = torch_util.torch2flax(variables, torch_model)
+#         # TODO: check cfg is correct.
+#         input_size = (4, *model_cfg.get("input_size", (224, 224, 3)))
 
-        for seed in range(5):
-            input = jr.uniform(
-                jr.PRNGKey(seed),
-                (4, *default_cfg.get("input_size", (224, 224, 3))),
-                dtype=jnp.float32,
-            )
-            assert_equal_preds(flax_model, torch_model, variables, input)
-        model_path.write_bytes(pickle.dumps(variables))
+#         input = jnp.zeros(input_size, dtype=jnp.float32)
+#         variables = flax_model.init(jr.PRNGKey(0), input)
+#         variables = load_torch_state(variables, torch_model)
 
-
-def main(save_dir):
-    for model_name, ckpt_dict in _checkpoint_registry.items():
-        for ckpt_name, (url, _) in ckpt_dict.items():
-            if isinstance(ckpt_name, str) and url is None:
-                download_model(
-                    save_dir,
-                    model_name,
-                    pretrained=ckpt_name,
-                )
-
-
-if __name__ == "__main__":
-    main("weights/")
+#         assert_equal(flax_model, torch_model, variables, input)
+#         model_path.write_bytes(pickle.dumps(variables))

@@ -8,7 +8,7 @@ import jax.random as jr
 from flax import linen
 import chex
 
-from limo import get_config
+from .configuration import get_config
 
 
 def Dense(
@@ -32,6 +32,7 @@ def Conv(
     features: int,
     kernel_size: int | tp.Sequence[int],
     stride: int | tp.Sequence[int] = 1,
+    padding: str = "SAME",
     dilation: int | tp.Sequence[int] = 1,
     groups: int = 1,
     bias: bool = False,
@@ -55,13 +56,11 @@ def Conv(
         dilation = (dilation,) * num_spatial_dims
     assert len(dilation) == num_spatial_dims
 
-    if torch_like:
+    if padding == "SAME" and torch_like:
         padding = []
         for k, s, d in zip(kernel_size, stride, dilation):
             pad_size = ((s - 1) + d * (k - 1)) // 2
             padding.append((pad_size, pad_size))
-    else:
-        padding = "SAME"
 
     return linen.Conv(
         features,
@@ -90,6 +89,26 @@ def BatchNorm(
         use_running_average=not get_config("train"),
         axis=axis,
         momentum=momentum,
+        epsilon=epsilon,
+        dtype=get_config("norm_dtype"),
+        use_bias=use_bias,
+        use_scale=use_scale,
+        bias_init=bias_init,
+        scale_init=scale_init,
+        axis_name=get_config("axis_name"),
+        name=name,
+    )
+
+
+def LayerNorm(
+    epsilon: float = 1e-5,
+    use_bias: bool = True,
+    use_scale: bool = True,
+    bias_init: tp.Callable = linen.initializers.zeros,
+    scale_init: tp.Callable = linen.initializers.ones,
+    name: str | None = None,
+) -> linen.LayerNorm:
+    return linen.LayerNorm(
         epsilon=epsilon,
         dtype=get_config("norm_dtype"),
         use_bias=use_bias,
