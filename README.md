@@ -21,5 +21,11 @@ state, params = variables.pop("params")
 out = model.apply({"params": params, **state}, x)
 
 # train mode.
-out, new_state = model.apply({"params": params, **state}, x, rngs={"dropout": jax.random.PRNGKey(0)} is_training=True, mutable=True)
+out, new_state = model.apply(
+    {"params": params, **state}, 
+    x, 
+    rngs={"dropout": jax.random.PRNGKey(0)} 
+    is_training=True, 
+    mutable=True,
+)
 ```
