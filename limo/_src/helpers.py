@@ -17,6 +17,8 @@ from tqdm import tqdm
 from flax import linen, traverse_util, core
 import chex
 
+from limo import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+
 ModelFun = tp.Callable[..., linen.Module]
 SEP = "/"
 
@@ -27,6 +29,7 @@ class ModelEntry(tp.NamedTuple):
     family_name: str
     model_fun: ModelFun
     url: str | None
+    meta: dict[str, tp.Any]
     defaults: tp.Mapping
 
 
@@ -44,7 +47,13 @@ def dumps(obj):
     return zlib.compress(pickle.dumps(obj))
 
 
-def register_model(pretrained: str, url: str | None = None, default: bool = False, **kwargs):
+def register_model(
+    pretrained: str,
+    url: str | None = None,
+    default: bool = False,
+    meta: dict[str, tp.Any] | None = None,
+    **kwargs,
+):
     """
 
     Args:
@@ -57,6 +66,15 @@ def register_model(pretrained: str, url: str | None = None, default: bool = Fals
     frameinfo = inspect.getframeinfo(frame)
     family_name = Path(frameinfo.filename).stem
 
+    if meta is None:
+        meta = dict()
+
+    default_meta = {
+        "input_size": (224, 224),
+        "mean": IMAGENET_DEFAULT_MEAN,
+        "std": IMAGENET_DEFAULT_STD,
+    }
+
     def register(model_fun: ModelFun):
         name = model_fun.__name__
         new_entry = ModelEntry(
@@ -65,6 +83,7 @@ def register_model(pretrained: str, url: str | None = None, default: bool = Fals
             family_name=family_name,
             model_fun=model_fun,
             url=url,
+            meta=dict(default_meta, **meta),
             defaults=kwargs,
         )
         _model_registry[name][pretrained] = new_entry
@@ -76,7 +95,13 @@ def register_model(pretrained: str, url: str | None = None, default: bool = Fals
     return register
 
 
-def fake_register_model(pretrained: str, url: str | None = None, default: bool = False, **defaults):
+def fake_register_model(
+    pretrained: str,
+    url: str | None = None,
+    default: bool = False,
+    meta: dict[str, tp.Any] | None = None,
+    **kwargs,
+):
     """Have the same interfance of `register_model`, but do nothing."""
 
     def register(model_fun: ModelFun):
@@ -85,16 +110,19 @@ def fake_register_model(pretrained: str, url: str | None = None, default: bool =
     return register
 
 
-def create_model(name: str, pretrained: bool | str = False, **kwargs) -> linen.Module:
+def create_model(
+    name: str, pretrained: bool | str = False, with_meta: bool = False, **kwargs
+) -> linen.Module | tuple[linen.Module, dict[str, tp.Any]]:
     """Instantiate flax model.
 
     Args:
         name: Model name.
         pretrained: Pretrained weight name. Used to determine default parameters.
+        with_meta: Whether to returns model and meta info.
         **kwargs: Arguments of the specified model.
 
     Returns:
-        Instantiated flax model.
+        Model or tuple of model and meta info.
     """
     assert name in _model_registry, f"The specified model {name} is not registered yet."
 
@@ -103,7 +131,22 @@ def create_model(name: str, pretrained: bool | str = False, **kwargs) -> linen.M
 
     entry = _model_registry[name][pretrained]
     new_kwargs = dict(entry.defaults, **kwargs)
-    return entry.model_fun(**new_kwargs)
+    model = entry.model_fun(**new_kwargs)
+
+    if with_meta:
+        return model, get_model_meta(name, pretrained)
+    else:
+        return model
+
+
+def get_model_meta(name: str, pretrained: bool | str = False) -> dict[str, tp.Any]:
+    assert name in _model_registry, f"The specified model {name} is not registered yet."
+
+    msg = f"The specified pretrained version {pretrained} is not registered yet for {name}."
+    assert pretrained in _model_registry[name], msg
+
+    entry = _model_registry[name][pretrained]
+    return entry.meta
 
 
 def list_models(name: str | None = None, pretrained: str | bool = False) -> tp.Sequence[str]:

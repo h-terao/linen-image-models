@@ -128,6 +128,7 @@ class VisionTransformer(linen.Module):
 @register_model(
     "IMAGENET1K_SWAG_E2E_V1",
     url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118950&authkey=ALwqBkoCHhnBYNI",  # noqa: E501
+    meta={"input_size": (384, 384)},
 )
 @register_model(
     "IMAGENET1K_SWAG_LINEAR_V1",
@@ -168,6 +169,7 @@ def vit_b_32(**kwargs) -> VisionTransformer:
 @register_model(
     "IMAGENET1K_SWAG_E2E_V1",
     url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118951&authkey=AIhATrEjwHjXEmM",  # noqa: E501
+    meta={"input_size": (512, 512)},
 )
 @register_model(
     "IMAGENET1K_SWAG_LINEAR_V1",
@@ -203,6 +205,7 @@ def vit_l_32(**kwargs) -> VisionTransformer:
 @register_model(
     "IMAGENET1K_SWAG_E2E_V1",
     url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118953&authkey=ADfBxYKPk3859MY",  # noqa: E501
+    meta={"input_size": (518, 518)},
     default=True,
 )
 @register_model(
