@@ -1,231 +1,176 @@
-"""ConvNext"""
 from __future__ import annotations
 import typing as tp
-import inspect
+from functools import partial
 
 import jax.numpy as jnp
 from flax import linen
 import chex
 
-from limo import layers
-from limo import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from limo import register_model, register_pretrained
+from limo import register_model
 
 
 ModuleDef = tp.Any
 
 
-class ConvNextBlock(linen.Module):
+class ConvNeXtBlock(linen.Module):
     features: int
-    kernel_size: int = 7
-    stride: int = 1
-    dilation: int = 1
-    mlp_ratio: int = 4
-    conv_mlp: bool = False
-    conv_bias: bool = True
-    ls_init_value: float | None = 1e-6
-    drop_path_ratio: float = 0
-    torch_like: bool = True
-    conv_layer: ModuleDef = layers.Conv
-    act_layer: ModuleDef = layers.GELU
-    norm_layer: ModuleDef = layers.LayerNorm
+    init_layer_scale: float
+    drop_path_rate: float
+
+    dense: ModuleDef
+    conv: ModuleDef
+    norm: ModuleDef
+    stochastic_depth: ModuleDef
 
     @linen.compact
     def __call__(self, x: chex.Array) -> chex.Array:
-        identity = x
-        x = self.conv_layer(
+        h = self.conv(
             self.features,
-            kernel_size=self.kernel_size,
-            stride=self.stride,
-            dilation=self.dilation,
-            groups=x.shape[-1],
-            bias=self.conv_bias,
-            torch_like=self.torch_like,
-            name="conv_dw",
+            (7, 7),
+            padding=3,
+            feature_group_count=self.features,
+            name="block.0",
         )(x)
+        h = self.norm(name="block.2")(h)
+        h = self.dense(4 * self.features, name="block.3")(h)
+        h = linen.gelu(h, approximate=False)
+        h = self.dense(self.features, name="block.5")(h)
 
-        x = self.norm_layer(name="norm")(x)
-        x = self.conv_layer(
-            int(self.features * self.mlp_ratio),
-            kernel_size=1,
-            bias=True,
-            torch_like=self.torch_like,
-            name="mlp.fc1",
-        )(x)
-        x = self.act_layer(name="act")(x)
-        x = self.conv_layer(
-            self.features, kernel_size=1, bias=True, torch_like=self.torch_like, name="mlp.fc2"
-        )(x)
-
-        if self.ls_init_value is not None:
-            x *= self.param(
-                "gamma",
-                linen.initializers.constant(self.ls_init_value),
-                (self.features,),
-            )
-
-        x = layers.DropPath(self.drop_path_ratio)(x) + identity
-        return x
-
-
-class ConvNextStage(linen.Module):
-    features: int
-    kernel_size: int = 7
-    stride: int = 2
-    depth: int = 2
-    dilation: int = (1, 1)
-    drop_path_rates: tp.Sequence = None
-    ls_init_value: float = 1.0
-    conv_bias: bool = True
-    torch_like: bool = True
-    conv_layer: ModuleDef = layers.Conv
-    act_layer: ModuleDef = layers.GELU
-    norm_layer: ModuleDef = layers.LayerNorm
-
-    @linen.compact
-    def __call__(self, x: chex.Array) -> chex.Array:
-        if x.shape[-1] != self.features or self.stride > 1 or self.dilation[0] != self.dilation[1]:
-            ds_ks = 2 if self.stride > 1 or self.dilation[0] != self.dilation[1] else 1
-            x = self.norm_layer(name="downsample.0")(x)
-            x = self.conv_layer(
-                self.features,
-                kernel_size=(ds_ks, ds_ks),
-                stride=self.stride,
-                dilation=self.dilation[0],
-                bias=self.conv_bias,
-                padding="SAME" if self.dilation[1] > 1 else "VALID",
-                name="downsample.1",
-            )(x)
-
-        drop_path_rates = self.drop_path_rates
-        if drop_path_rates is None:
-            drop_path_rates = [0.0] * self.depth
-
-        for i in range(self.depth):
-            x = ConvNextBlock(
-                features=self.features,
-                kernel_size=self.kernel_size,
-                dilation=self.dilation[1],
-                conv_bias=self.conv_bias,
-                ls_init_value=self.ls_init_value,
-                drop_path_ratio=drop_path_rates[i],
-                torch_like=self.torch_like,
-                conv_layer=self.conv_layer,
-                act_layer=self.act_layer,
-                norm_layer=self.norm_layer,
-                name=f"blocks.{i}",
-            )(x)
-        return x
+        h = h * self.param(
+            "layer_scale", linen.initializers.constant(self.init_layer_scale), (self.features,)
+        )
+        h = self.stochastic_depth(self.drop_path_rate)(h)
+        return x + h
 
 
 class ConvNeXt(linen.Module):
-    num_classes: int = 1000
-    output_stride: int = 32
-    depths: tp.Sequence[int] = (3, 3, 9, 3)
-    dims: tp.Sequence[int] = (96, 192, 384, 768)
-    kernel_size: int | tp.Sequence[int] = 7
-    ls_init_value: float = 1e-6
-    patch_size: int = 4
+    widths: tp.Sequence[int]
+    depths: tp.Sequence[int]
+
     drop_rate: float = 0
     drop_path_rate: float = 0
-    conv_bias: bool = True
-    torch_like: bool = True
-    conv_layer: ModuleDef = layers.Conv
-    act_layer: ModuleDef = layers.GELU
-    norm_layer: ModuleDef = layers.LayerNorm
+    init_layer_scale: float = 1e-6
+    num_classes: int = 1000
+    dtype: chex.ArrayDType = jnp.float32
+    norm_dtype: chex.ArrayDType | None = None
+    axis_name: str | None = None
 
     @linen.compact
-    def __call__(self, x: chex.Array) -> chex.Array:
-        kernel_sizes = (
-            (self.kernel_size,) * 4 if isinstance(self.kernel_size, int) else self.kernel_size
+    def __call__(self, x: chex.Array, is_training: bool = False) -> chex.Array:
+        dense = partial(
+            linen.Dense,
+            dtype=self.dtype,
+            kernel_init=linen.initializers.variance_scaling(
+                scale=0.02, mode="fan_in", distribution="truncated_normal"
+            ),
+        )
+        conv = partial(
+            linen.Conv,
+            dtype=self.dtype,
+            kernel_init=linen.initializers.variance_scaling(
+                scale=0.02, mode="fan_in", distribution="truncated_normal"
+            ),
+        )
+        norm = partial(
+            linen.LayerNorm, dtype=self.norm_dtype or self.dtype, axis_name=self.axis_name
+        )
+        stochastic_depth = partial(
+            linen.Dropout, broadcast_dims=(-1, -2, -3), deterministic=not is_training
         )
 
-        x = self.conv_layer(
-            self.dims[0],
-            kernel_size=self.patch_size,
-            stride=self.patch_size,
-            bias=self.conv_bias,
-            name="stem.0",
+        assert len(self.widths) == len(self.depths)
+        layer_idx = 0
+
+        # stem
+        x = conv(
+            self.widths[0],
+            (4, 4),
+            strides=4,
+            padding=0,
+            name=f"features.{layer_idx}.0",
         )(x)
-        x = self.norm_layer(name="stem.1")(x)
+        x = norm(name=f"features.{layer_idx}.1")(x)
+        layer_idx += 1
 
-        print("STEM SIZE:", x.shape)
+        total_blocks = sum(self.depths)
+        for i, (width, depth) in enumerate(zip(self.widths, self.depths)):
+            # bottlenecks
+            for j in range(depth):
+                x = ConvNeXtBlock(
+                    width,
+                    self.init_layer_scale,
+                    self.drop_path_rate * (layer_idx - 1) / (total_blocks - 1),
+                    dense=dense,
+                    conv=conv,
+                    norm=norm,
+                    stochastic_depth=stochastic_depth,
+                    name=f"features.{layer_idx}.{j}",
+                )(x)
+            layer_idx += 1
 
-        drop_path_rates = jnp.split(
-            jnp.linspace(0, self.drop_path_rate, sum(self.depths)),
-            jnp.cumsum(jnp.array(self.depths))[:-1],
-        )
+            if i + 1 < len(self.widths):
+                # downsampling.
+                x = norm(name=f"features.{layer_idx}.0")(x)
+                x = conv(
+                    self.widths[i + 1],
+                    (2, 2),
+                    2,
+                    padding=0,
+                    name=f"features.{layer_idx}.1",
+                )(x)
+                layer_idx += 1
 
-        dilation = 1
-        curr_stride = self.patch_size
-        for i in range(4):
-            stride = 2 if curr_stride == 2 or i > 0 else 1
-            if curr_stride >= self.output_stride and self.stride > 1:
-                dilation *= stride
-                stride = 1
-            curr_stride *= stride
-            first_dilation = 1 if dilation in (1, 2) else 2
-            print(stride, curr_stride, first_dilation, dilation)
-            x = ConvNextStage(
-                self.dims[i],
-                kernel_size=kernel_sizes[i],
-                stride=stride,
-                depth=self.depths[i],
-                dilation=(first_dilation, dilation),
-                drop_path_rates=drop_path_rates[i],
-                ls_init_value=self.ls_init_value,
-                conv_bias=self.conv_bias,
-                torch_like=self.torch_like,
-                conv_layer=self.conv_layer,
-                act_layer=self.act_layer,
-                norm_layer=self.norm_layer,
-                name=f"stages.{i}",
-            )(x)
-            print("STAGE SIZE:", x.shape)
-
-        print("Pooling shape:", x.shape)
-
+        # global average pooling
         x = jnp.mean(x, axis=(-2, -3))
-        x = self.norm_layer(name="head.norm")(x)
-        x = layers.Dense(self.num_classes, name="head.fc")(x)
+
+        if self.num_classes > 0:
+            x = norm(name="classifier.0")(x)
+            x = linen.Dropout(self.drop_rate, deterministic=not is_training)(x)
+            x = dense(self.num_classes, name="classifier.2")(x)
+
         return x
 
-
-def _convnext(
-    depths: tp.Sequence[int] = (3, 3, 9, 3),
-    dims: tp.Sequence[int] = (96, 192, 384, 768),
-):
-    def model_maker(**kwargs):
-        all_keys = inspect.signature(ConvNeXt).parameters
-        kwargs = {k: v for k, v in kwargs.items() if k in all_keys}
-        return ConvNeXt(depths=depths, dims=dims, **kwargs)
-
-    return model_maker
+    @property
+    def rng_keys(self) -> tp.Sequence[str]:
+        # Stochastic depth also uses dropout rng collection.
+        return ["dropout"]
 
 
-convnext_atto = _convnext(depths=(2, 2, 6, 2), dims=(40, 80, 160, 320))
-convnext_femto = _convnext(depths=(2, 2, 6, 2), dims=(48, 96, 192, 384))
-convnext_pico = _convnext(depths=(2, 2, 6, 2), dims=(64, 128, 256, 512))
-convnext_nano = _convnext(depths=(2, 2, 8, 2), dims=(80, 160, 320, 640))
-convnext_tiny = _convnext(depths=(3, 3, 9, 3), dims=(96, 192, 384, 768))
-convnext_small = _convnext(depths=(3, 3, 27, 3), dims=(96, 192, 384, 768))
-convnext_base = _convnext(depths=(3, 3, 27, 3), dims=(128, 256, 512, 1024))
-convnext_large = _convnext(depths=(3, 3, 27, 3), dims=(192, 384, 768, 1536))
-
-_cfg = {
-    "num_classes": 1000,
-    "input_size": (224, 224, 3),
-    "crop_pct": 0.875,
-    "interpolation": "bicubic",
-    "mean": IMAGENET_DEFAULT_MEAN,
-    "std": IMAGENET_DEFAULT_STD,
-}
-
-
-register_model("convnext_tiny", convnext_tiny, _cfg)
-register_pretrained(
-    "convnext_tiny",
-    "d2_in1k",
-    # url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118882&authkey=AF_ciaUf0a6D-kI",  # noqa: E501
+@register_model(
+    "IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118919&authkey=ACjW5LU-jm8JTnA",  # noqa: E501
     default=True,
 )
+def convnext_tiny(**kwargs) -> ConvNeXt:
+    kwargs.setdefault("drop_path_rate", 0.1)
+    return ConvNeXt([96, 192, 384, 768], [3, 3, 9, 3], **kwargs)
+
+
+@register_model(
+    "IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118920&authkey=AG62QxOQTpUPPV4",  # noqa: E501
+    default=True,
+)
+def convnext_small(**kwargs) -> ConvNeXt:
+    kwargs.setdefault("drop_path_rate", 0.4)
+    return ConvNeXt([96, 192, 384, 768], [3, 3, 27, 3], **kwargs)
+
+
+@register_model(
+    "IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118922&authkey=APdfeRZrgcg873Y",  # noqa: E501
+    default=True,
+)
+def convnext_base(**kwargs) -> ConvNeXt:
+    kwargs.setdefault("drop_path_rate", 0.5)
+    return ConvNeXt([128, 256, 512, 1024], [3, 3, 27, 3], **kwargs)
+
+
+@register_model(
+    "IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118931&authkey=AIaH9uWOCPCIA_I",  # noqa: E501
+    default=True,
+)
+def convnext_large(**kwargs) -> ConvNeXt:
+    kwargs.setdefault("drop_path_rate", 0.5)
+    return ConvNeXt([192, 384, 768, 1536], [3, 3, 27, 3], **kwargs)

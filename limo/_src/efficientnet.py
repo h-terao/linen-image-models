@@ -1,21 +1,13 @@
 from __future__ import annotations
 import typing as tp
-import dataclasses
 from functools import partial
-import inspect
 import math
 
 import jax.numpy as jnp
 from flax import linen
 import chex
 
-from limo import layers
-from limo import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from limo import register_model, register_pretrained
-
-# Uncomment below two lines if you folk this file.
-# register_model = lambda x, y: y
-# register_variables = lambda *args, **kwargs: None
+from limo import register_model
 
 
 ModuleDef = tp.Any
@@ -32,364 +24,390 @@ def make_divisible(
 
 
 class SqueezeExcite(linen.Module):
-    rd_ratio: float = 0.25
-    rd_features: int | None = None
-    conv_layer: ModuleDef = layers.Conv
-    act_layer: ModuleDef = layers.ReLU
-    gate_layer: ModuleDef = layers.Sigmoid
-    round_fn: tp.Callable = round
+    hidden_dim: int
+    act: tp.Callable = linen.relu
+    scale_act: tp.Callable = linen.sigmoid
+    conv: ModuleDef = linen.Conv
 
     @linen.compact
     def __call__(self, x: chex.Array) -> chex.Array:
-        features = x.shape[-1]
-        rd_features = self.rd_features or round(self.rd_ratio * features)
-
-        x_se = jnp.mean(x, axis=(-2, -3), keepdims=True)
-        x_se = self.conv_layer(rd_features, 1, bias=True, name="conv_reduce")(x_se)
-        x_se = self.act_layer(name="act1")(x_se)
-        x_se = self.conv_layer(features, 1, bias=True, name="conv_expand")(x_se)
-        return x * self.gate_layer(name="gate")(x_se)
+        h = jnp.mean(x, axis=(-2, -3), keepdims=True)
+        h = self.conv(self.hidden_dim, (1, 1), padding=0, name="fc1")(h)
+        h = self.act(h)
+        h = self.conv(x.shape[-1], (1, 1), padding=0, name="fc2")(h)
+        return x * self.scale_act(h)
 
 
-class DepthwiseSeparableConv(linen.Module):
+class MBConv(linen.Module):
     features: int
-    dw_kernel_size: int = 3
-    stride: int = 1
-    dilation: int = 1
-    group_size: int = 1
-    no_skip: bool = False
-    pw_kernel_size: int = 1
-    pw_act: bool = False
-    se_ratio: float = 0
-    drop_path_rate: float = 0
-    torch_like: bool = True
-    conv_layer: ModuleDef = layers.Conv
-    act_layer: ModuleDef = layers.ReLU
-    norm_layer: ModuleDef = layers.BatchNorm
-
-    @linen.compact
-    def __call__(self, x: chex.Array) -> chex.Array:
-        conv_layer = partial(self.conv_layer, torch_like=self.torch_like)
-
-        in_features = x.shape[-1]
-        if self.group_size:
-            groups, mod = divmod(in_features, self.group_size)
-            assert mod == 0
-        else:
-            groups = 1
-
-        identity = x
-
-        x = conv_layer(
-            in_features,
-            self.dw_kernel_size,
-            stride=self.stride,
-            dilation=self.dilation,
-            groups=groups,
-            name="conv_dw",
-        )(x)
-        x = self.norm_layer(name="bn1")(x)
-        x = self.act_layer(name="bn1.act")(x)
-
-        # squeeze-and-excitation.
-        if self.se_ratio > 0:
-            x = SqueezeExcite(
-                self.se_ratio,
-                conv_layer=self.conv_layer,
-                act_layer=self.act_layer,
-                name="se",
-            )(x)
-
-        x = conv_layer(self.features, self.pw_kernel_size, name="conv_pw")(x)
-        x = self.norm_layer(name="bn2")(x)
-        if self.pw_act:
-            x = self.act_layer(name="bn2.act")(x)
-
-        if x.shape == identity.shape and not self.no_skip:
-            x = layers.DropPath(self.drop_path_rate, name="drop_path")(x) + identity
-
-        return x
-
-
-class InvertedResidual(linen.Module):
-    features: int
-    dw_kernel_size: int = 3
-    stride: int = 1
-    dilation: int = 1
-    group_size: int = 1
-    no_skip: bool = False
-    exp_ratio: float = 1.0
-    exp_kernel_size: int = 1
-    pw_kernel_size: int = 1
-    se_ratio: float = 0
-    drop_path_rate: float = 0
-    torch_like: bool = True
-    conv_layer: ModuleDef = layers.Conv
-    act_layer: ModuleDef = layers.ReLU
-    norm_layer: ModuleDef = layers.BatchNorm
-
-    @linen.compact
-    def __call__(self, x: chex.Array) -> chex.Array:
-        conv_layer = partial(self.conv_layer, torch_like=self.torch_like)
-
-        in_features = x.shape[-1]
-        mid_features = make_divisible(in_features * self.exp_ratio)
-        if self.group_size:
-            groups, mod = divmod(mid_features, self.group_size)
-            assert mod == 0
-        else:
-            groups = 1
-
-        identity = x
-
-        # Point-wise expansion
-        x = conv_layer(mid_features, self.exp_kernel_size, name="conv_pw")(x)
-        x = self.norm_layer(name="bn1")(x)
-        x = self.act_layer(name="bn1.act")(x)
-
-        # Depth-wise convolution
-        x = conv_layer(
-            mid_features,
-            self.dw_kernel_size,
-            self.stride,
-            dilation=self.dilation,
-            groups=groups,
-            name="conv_dw",
-        )(x)
-        x = self.norm_layer(name="bn2")(x)
-        x = self.act_layer(name="bn2.act")(x)
-
-        # squeeze-and-excitation.
-        if self.se_ratio > 0:
-            x = SqueezeExcite(
-                self.se_ratio / self.exp_ratio,
-                conv_layer=self.conv_layer,
-                act_layer=self.act_layer,
-                name="se",
-            )(x)
-
-        # Point-wise linear projection
-        x = conv_layer(self.features, self.pw_kernel_size, 1, name="conv_pwl")(x)
-        x = self.norm_layer(name="bn3")(x)
-
-        if x.shape == identity.shape and not self.no_skip:
-            x = layers.DropPath(self.drop_path_rate, name="drop_path")(x) + identity
-
-        return x
-
-
-@dataclasses.dataclass
-class StageSpec:
-    block: ModuleDef
-    num_blocks: int
+    expand_ratio: float
     kernel_size: int
     stride: int
-    exp_ratio: float
+    drop_path_rate: float
+    conv: ModuleDef  # partial(use_bias=False, dtype)
+    norm: ModuleDef  # partial(use_running_average, dtype, axis_name)
+    squeeze_excite: ModuleDef  # partial(act, dtype)
+    stochastic_depth: ModuleDef
+
+    @linen.compact
+    def __call__(self, x: chex.Array) -> chex.Array:
+        h = x
+
+        features = x.shape[-1]
+        expanded_features = make_divisible(features * self.expand_ratio)
+
+        block_idx = 0
+        if features != expanded_features:
+            h = self.conv(expanded_features, (1, 1), padding=0, name=f"block.{block_idx}.0")(h)
+            h = self.norm(name=f"block.{block_idx}.1")(h)
+            h = linen.silu(h)
+            block_idx += 1
+
+        # depthwise.
+        h = self.conv(
+            expanded_features,
+            (self.kernel_size, self.kernel_size),
+            strides=self.stride,
+            padding=((self.stride - 1) + (self.kernel_size - 1)) // 2,
+            feature_group_count=expanded_features,
+            name=f"block.{block_idx}.0",
+        )(h)
+        h = self.norm(name=f"block.{block_idx}.1")(h)
+        h = linen.silu(h)
+        block_idx += 1
+
+        # squeeze and excitation.
+        h = self.squeeze_excite(max(1, features // 4), name=f"block.{block_idx}")(h)
+        block_idx += 1
+
+        # project
+        h = self.conv(self.features, (1, 1), padding=0, name=f"block.{block_idx}.0")(h)
+        h = self.norm(name=f"block.{block_idx}.1")(h)
+        block_idx += 1
+
+        if x.shape == h.shape:
+            # residual connection.
+            h = x + self.stochastic_depth(rate=self.drop_path_rate)(h)
+
+        return h
+
+
+class FusedMBConv(linen.Module):
     features: int
-    se_ratio: float = 0
-    no_skip: bool = False
+    expand_ratio: float
+    kernel_size: int
+    stride: int
+    drop_path_rate: float
+    conv: ModuleDef  # partial(use_bias=False, dtype)
+    norm: ModuleDef  # partial(use_running_average, dtype, axis_name)
+    squeeze_excite: ModuleDef  # partial(act, dtype)
+    stochastic_depth: ModuleDef
+
+    @linen.compact
+    def __call__(self, x: chex.Array) -> chex.Array:
+        h = x
+
+        features = x.shape[-1]
+        expanded_features = make_divisible(features * self.expand_ratio)
+
+        block_idx = 0
+        if features != expanded_features:
+            # fused expand.
+            h = self.conv(
+                expanded_features,
+                (self.kernel_size, self.kernel_size),
+                strides=self.stride,
+                padding=((self.stride - 1) + (self.kernel_size - 1)) // 2,
+                name=f"block.{block_idx}.0",
+            )(h)
+            h = self.norm(name=f"block.{block_idx}.1")(h)
+            h = linen.silu(h)
+            block_idx += 1
+
+            # project.
+            h = self.conv(self.features, (1, 1), padding=0, name=f"block.{block_idx}.0")(h)
+            h = self.norm(name=f"block.{block_idx}.1")(h)
+            block_idx += 1
+        else:
+            # fused expand.
+            h = self.conv(
+                self.features,
+                (self.kernel_size, self.kernel_size),
+                strides=self.stride,
+                padding=((self.stride - 1) + (self.kernel_size - 1)) // 2,
+                name=f"block.{block_idx}.0",
+            )(h)
+            h = self.norm(name=f"block.{block_idx}.1")(h)
+            h = linen.silu(h)
+            block_idx += 1
+
+        if x.shape == h.shape:
+            # residual connection.
+            h = x + self.stochastic_depth(rate=self.drop_path_rate)(h)
+
+        return h
+
+
+class BlockSpec(tp.NamedTuple):
+    block: ModuleDef
+    features: int
+    expand_ratio: float
+    kernel_size: int
+    stride: int
+    num_layers: int
 
 
 class EfficientNet(linen.Module):
-    """
-    Args:
-        torch_like: If True, use PyTorch-like padding approach
-            in conv and pooling layers.
-    """
-
-    stage_specs: tp.Sequence[StageSpec]
     stem_size: int
-    features: int
-    num_classes: int = 1000
+    block_specs: tp.Sequence[BlockSpec]
+    features: int | None = None
     drop_rate: float = 0
+
+    num_classes: int = 1000
     drop_path_rate: float = 0.2
-    torch_like: bool = True
-    conv_layer: ModuleDef = layers.Conv
-    norm_layer: ModuleDef = layers.BatchNorm
-    act_layer: ModuleDef = layers.SiLU
+    dtype: chex.ArrayDType = jnp.float32
+    norm_dtype: chex.ArrayDType | None = None
+    norm_momentum: float = 0.9
+    norm_epsilon: float = 1e-5
+    axis_name: str | None = None
 
     @linen.compact
-    def __call__(self, x: chex.Array) -> chex.Array:
-        conv_layer = partial(self.conv_layer, torch_like=self.torch_like)
+    def __call__(self, x: chex.Array, is_training: bool = False) -> chex.Array:
+        conv = partial(linen.Conv, use_bias=False, dtype=self.dtype)
+        norm = partial(
+            linen.BatchNorm,
+            use_running_average=not is_training,
+            momentum=self.norm_momentum,
+            epsilon=self.norm_epsilon,
+            dtype=self.norm_dtype or self.dtype,
+            axis_name=self.axis_name,
+        )
+        squeeze_excite = partial(SqueezeExcite, act=linen.silu, conv=conv)
+        stochastic_depth = partial(
+            linen.Dropout, broadcast_dims=(-1, -2, -3), deterministic=not is_training
+        )
+        layer_idx = 0
 
-        x = conv_layer(self.stem_size, 3, 2, name="conv_stem")(x)
-        x = self.norm_layer(name="bn1")(x)
-        x = self.act_layer(name="bn1.act")(x)
+        # stem
+        x = conv(self.stem_size, (3, 3), 2, padding=1, name=f"features.{layer_idx}.0")(x)
+        x = norm(name=f"features.{layer_idx}.1")(x)
+        x = linen.silu(x)
+        layer_idx += 1
 
-        total_blocks = sum(x.num_blocks for x in self.stage_specs)
+        total_blocks = sum([block_spec.num_layers for block_spec in self.block_specs])
         block_idx = 0
-        for i, stage_spec in enumerate(self.stage_specs):
-            kwargs = {
-                "features": stage_spec.features,
-                "dw_kernel_size": stage_spec.kernel_size,
-                "se_ratio": stage_spec.se_ratio,
-                "conv_layer": self.conv_layer,
-                "norm_layer": self.norm_layer,
-                "act_layer": self.act_layer,
-                "no_skip": stage_spec.no_skip,
-                "torch_like": self.torch_like,
-            }
-
-            # Some blocks need to modify args.
-            if stage_spec.block == InvertedResidual:
-                kwargs["exp_ratio"] = stage_spec.exp_ratio
-
-            for j in range(stage_spec.num_blocks):
-                x = stage_spec.block(
-                    stride=stage_spec.stride if j == 0 else 1,
+        for block_spec in self.block_specs:
+            for i in range(block_spec.num_layers):
+                x = block_spec.block(
+                    features=block_spec.features,
+                    expand_ratio=block_spec.expand_ratio,
+                    kernel_size=block_spec.kernel_size,
+                    stride=block_spec.stride if i == 0 else 1,
                     drop_path_rate=self.drop_path_rate * block_idx / total_blocks,
-                    **kwargs,
-                    name=f"blocks.{i}.{j}",
+                    conv=conv,
+                    norm=norm,
+                    squeeze_excite=squeeze_excite,
+                    stochastic_depth=stochastic_depth,
+                    name=f"features.{layer_idx}.{i}",
                 )(x)
                 block_idx += 1
+            layer_idx += 1
 
-        x = conv_layer(self.features, 1, torch_like=self.torch_like, name="conv_head")(x)
-        x = self.norm_layer(name="bn2")(x)
-        x = self.act_layer(name="bn2.act")(x)
+        # Last several layers.
+        x = conv(
+            self.features or 4 * block_spec.features,
+            (1, 1),
+            padding=0,
+            name=f"features.{layer_idx}.0",
+        )(x)
+        x = norm(name=f"features.{layer_idx}.1")(x)
+        x = linen.silu(x)
 
-        x = jnp.mean(x, axis=(-2, -3))  # GAP
+        # global average pooling.
+        x = jnp.mean(x, axis=(-2, -3))
+
         if self.num_classes > 0:
-            x = layers.Dropout(self.drop_rate)(x)
-            x = layers.Dense(self.num_classes, name="classifier")(x)
+            x = linen.Dropout(self.drop_rate)(x, not is_training)
+            x = linen.Dense(self.num_classes, dtype=self.dtype, name="classifier.1")(x)
+
         return x
 
+    @property
+    def rng_keys(self) -> tp.Sequence[str]:
+        # Stochastic depth also uses dropout rng collection.
+        return ["dropout"]
 
-def _efficientnet(feature_multiplier, depth_multiplier, drop_rate):
 
-    stage_specs = [
-        StageSpec(DepthwiseSeparableConv, 1, 3, 1, 1, 16, 0.25),
-        StageSpec(InvertedResidual, 2, 3, 2, 6, 24, 0.25),
-        StageSpec(InvertedResidual, 2, 5, 2, 6, 40, 0.25),
-        StageSpec(InvertedResidual, 3, 3, 2, 6, 80, 0.25),
-        StageSpec(InvertedResidual, 3, 5, 1, 6, 112, 0.25),
-        StageSpec(InvertedResidual, 4, 5, 2, 6, 192, 0.25),
-        StageSpec(InvertedResidual, 1, 3, 1, 6, 320, 0.25),
+def _efficientnet_v1_config(width_mult, depth_mult):
+    block_specs = [
+        BlockSpec(MBConv, 16, 1, 3, 1, 1),
+        BlockSpec(MBConv, 24, 6, 3, 2, 2),
+        BlockSpec(MBConv, 40, 6, 5, 2, 2),
+        BlockSpec(MBConv, 80, 6, 3, 2, 3),
+        BlockSpec(MBConv, 112, 6, 5, 1, 3),
+        BlockSpec(MBConv, 192, 6, 5, 2, 4),
+        BlockSpec(MBConv, 320, 6, 3, 1, 1),
     ]
 
-    # scale depth and width.
-    stage_specs = [
-        dataclasses.replace(
-            x,
-            features=make_divisible(feature_multiplier * x.features),
-            num_blocks=int(math.ceil(depth_multiplier * x.num_blocks)),
-        )
-        for x in stage_specs
+    new_block_specs = []
+    for block_spec in block_specs:
+        features = make_divisible(block_spec.features * width_mult)
+        num_layers = int(math.ceil(block_spec.num_layers * depth_mult))
+        new_block_spec = block_spec._replace(features=features, num_layers=num_layers)
+        new_block_specs.append(new_block_spec)
+
+    stem_size = make_divisible(32 * width_mult)
+    return stem_size, new_block_specs, None
+
+
+@register_model(
+    pretrained="IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118929&authkey=AMM6d8g3gpozW7M",  # noqa: E501
+    default=True,
+)
+def efficientnet_b0(**kwargs):
+    stem_size, block_specs, features = _efficientnet_v1_config(1.0, 1.0)
+    kwargs.setdefault("drop_rate", 0.2)
+    return EfficientNet(stem_size, block_specs, features, **kwargs)
+
+
+@register_model(
+    pretrained="IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118924&authkey=AM_ZAxIF6bceIfY",  # noqa: E501
+    default=True,
+)
+def efficientnet_b1(**kwargs):
+    stem_size, block_specs, features = _efficientnet_v1_config(1.0, 1.1)
+    kwargs.setdefault("drop_rate", 0.2)
+    return EfficientNet(stem_size, block_specs, features, **kwargs)
+
+
+@register_model(
+    pretrained="IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118930&authkey=AO_txgmS0-4cjxo",  # noqa: E501
+    default=True,
+)
+def efficientnet_b2(**kwargs):
+    stem_size, block_specs, features = _efficientnet_v1_config(1.1, 1.2)
+    kwargs.setdefault("drop_rate", 0.3)
+    return EfficientNet(stem_size, block_specs, features, **kwargs)
+
+
+@register_model(
+    pretrained="IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118923&authkey=ADFUQR9Rt3dokGc",  # noqa: E501
+    default=True,
+)
+def efficientnet_b3(**kwargs):
+    stem_size, block_specs, features = _efficientnet_v1_config(1.2, 1.4)
+    kwargs.setdefault("drop_rate", 0.3)
+    return EfficientNet(stem_size, block_specs, features, **kwargs)
+
+
+@register_model(
+    pretrained="IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118927&authkey=ADHllSwTMeKCwi4",  # noqa: E501
+    default=True,
+)
+def efficientnet_b4(**kwargs):
+    stem_size, block_specs, features = _efficientnet_v1_config(1.4, 1.8)
+    kwargs.setdefault("drop_rate", 0.4)
+    return EfficientNet(stem_size, block_specs, features, **kwargs)
+
+
+@register_model(
+    pretrained="IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118921&authkey=AMHpPcHlf6jQHK8",  # noqa:E501
+    default=True,
+)
+def efficientnet_b5(**kwargs):
+    stem_size, block_specs, features = _efficientnet_v1_config(1.6, 2.2)
+    kwargs.setdefault("drop_rate", 0.4)
+    kwargs.setdefault("norm_epsilon", 1e-3)
+    kwargs.setdefault("norm_momentum", 0.99)
+    return EfficientNet(stem_size, block_specs, features, **kwargs)
+
+
+@register_model(
+    pretrained="IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118928&authkey=AMY-SRgG9nngMbM",  # noqa:E501
+    default=True,
+)
+def efficientnet_b6(**kwargs):
+    stem_size, block_specs, features = _efficientnet_v1_config(1.8, 2.6)
+    kwargs.setdefault("drop_rate", 0.5)
+    kwargs.setdefault("norm_epsilon", 1e-3)
+    kwargs.setdefault("norm_momentum", 0.99)
+    return EfficientNet(stem_size, block_specs, features, **kwargs)
+
+
+@register_model(
+    pretrained="IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118933&authkey=AMT3FroLOieY4Ds",  # noqa: E501
+    default=True,
+)
+def efficientnet_b7(**kwargs):
+    stem_size, block_specs, features = _efficientnet_v1_config(2.0, 3.1)
+    kwargs.setdefault("drop_rate", 0.5)
+    kwargs.setdefault("norm_epsilon", 1e-3)
+    kwargs.setdefault("norm_momentum", 0.99)
+    return EfficientNet(stem_size, block_specs, features, **kwargs)
+
+
+@register_model(
+    pretrained="IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118925&authkey=AEKLdkU8H3mtDnY",  # noqa:E501
+    default=True,
+)
+def efficientnet_v2_s(**kwargs):
+    block_specs = [
+        BlockSpec(FusedMBConv, 24, 1, 3, 1, 2),
+        BlockSpec(FusedMBConv, 48, 4, 3, 2, 4),
+        BlockSpec(FusedMBConv, 64, 4, 3, 2, 4),
+        BlockSpec(MBConv, 128, 4, 3, 2, 6),
+        BlockSpec(MBConv, 160, 6, 3, 1, 9),
+        BlockSpec(MBConv, 256, 6, 3, 2, 15),
     ]
-
-    stem_size = make_divisible(feature_multiplier * 32)
-    features = 4 * stage_specs[-1].features
-
-    def model_maker(**kwargs):
-        if "drop_rate" not in kwargs:
-            kwargs["drop_rate"] = drop_rate
-
-        # filter.
-        all_keys = inspect.signature(EfficientNet).parameters
-        kwargs = {k: v for k, v in kwargs.items() if k in all_keys}
-
-        return EfficientNet(
-            stage_specs=stage_specs,
-            stem_size=stem_size,
-            features=features,
-            **kwargs,
-        )
-
-    return model_maker
+    kwargs.setdefault("drop_rate", 0.2)
+    kwargs.setdefault("norm_epsilon", 1e-3)
+    return EfficientNet(24, block_specs, 1280, **kwargs)
 
 
-efficientnet_b0 = _efficientnet(feature_multiplier=1.0, depth_multiplier=1.0, drop_rate=0.2)
-efficientnet_b1 = _efficientnet(feature_multiplier=1.0, depth_multiplier=1.1, drop_rate=0.2)
-efficientnet_b2 = _efficientnet(feature_multiplier=1.1, depth_multiplier=1.2, drop_rate=0.3)
-efficientnet_b3 = _efficientnet(feature_multiplier=1.2, depth_multiplier=1.4, drop_rate=0.3)
-efficientnet_b4 = _efficientnet(feature_multiplier=1.4, depth_multiplier=1.8, drop_rate=0.4)
-efficientnet_b5 = _efficientnet(feature_multiplier=1.6, depth_multiplier=2.2, drop_rate=0.4)
-efficientnet_b6 = _efficientnet(feature_multiplier=1.8, depth_multiplier=2.6, drop_rate=0.5)
-efficientnet_b7 = _efficientnet(feature_multiplier=2.0, depth_multiplier=3.1, drop_rate=0.5)
-efficientnet_b8 = _efficientnet(feature_multiplier=2.2, depth_multiplier=3.6, drop_rate=0.5)
-
-
-#
-#  Remove the below section if you folk this file.
-#
-
-_cfg = {
-    "num_classes": 1000,
-    "input_size": (224, 224, 3),
-    "crop_mode": None,
-    "crop_pct": 0.875,
-    "interpolation": "bicubic",
-    "mean": IMAGENET_DEFAULT_MEAN,
-    "std": IMAGENET_DEFAULT_STD,
-    "torch_like": True,
-}
-
-
-register_model("efficientnet_b0", efficientnet_b0, _cfg)
-register_model(
-    "efficientnet_b1", efficientnet_b1, dict(_cfg, test_input_size=(256, 256, 3), crop_pct=1.0)
-)
-register_model(
-    "efficientnet_b2",
-    efficientnet_b2,
-    dict(_cfg, input_size=(256, 256, 3), test_input_size=(288, 288, 3), crop_pct=1.0),
-)
-register_model(
-    "efficientnet_b3",
-    efficientnet_b3,
-    dict(_cfg, input_size=(288, 288, 3), test_input_size=(320, 320, 3), crop_pct=1.0),
-)
-register_model(
-    "efficientnet_b4",
-    efficientnet_b4,
-    dict(_cfg, input_size=(320, 320, 3), test_input_size=(384, 384, 3), crop_pct=1.0),
-)
-register_model(
-    "efficientnet_b5", efficientnet_b5, dict(_cfg, input_size=(456, 456, 3), crop_pct=0.934)
-)
-register_model(
-    "efficientnet_b6", efficientnet_b6, dict(_cfg, input_size=(528, 528, 3), crop_pct=0.942)
-)
-register_model(
-    "efficientnet_b7", efficientnet_b7, dict(_cfg, input_size=(600, 600, 3), crop_pct=0.949)
-)
-register_model(
-    "efficientnet_b8", efficientnet_b8, dict(_cfg, input_size=(672, 672, 3), crop_pct=0.954)
-)
-
-
-# Pretrained models come from TIMM.
-# https://github.com/rwightman/pytorch-image-models/blob/main/timm/models/efficientnet.py
-register_pretrained(
-    "efficientnet_b0",
-    "ra_in1k",
-    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118878&authkey=AG9gcJIqTDdSWnU",  # noqa: E501
+@register_model(
+    pretrained="IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118926&authkey=AOhvlaJKq7U00ls",  # noqa:E501
     default=True,
 )
+def efficientnet_v2_m(**kwargs):
+    block_specs = [
+        BlockSpec(FusedMBConv, 24, 1, 3, 1, 3),
+        BlockSpec(FusedMBConv, 48, 4, 3, 2, 5),
+        BlockSpec(FusedMBConv, 80, 4, 3, 2, 5),
+        BlockSpec(MBConv, 160, 4, 3, 2, 7),
+        BlockSpec(MBConv, 176, 6, 3, 1, 14),
+        BlockSpec(MBConv, 304, 6, 3, 2, 18),
+        BlockSpec(MBConv, 512, 6, 3, 1, 5),
+    ]
+    kwargs.setdefault("drop_rate", 0.3)
+    kwargs.setdefault("norm_epsilon", 1e-3)
+    return EfficientNet(24, block_specs, 1280, **kwargs)
 
-register_pretrained(
-    "efficientnet_b1",
-    "ft_in1k",
-    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118880&authkey=ABVOTHwmZyMNApU",  # noqa: E501
+
+@register_model(
+    pretrained="IMAGENET1K_V1",
+    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118934&authkey=AG_Rxb4CNwOFBCE",  # noqa:E501
     default=True,
 )
-
-register_pretrained(
-    "efficientnet_b2",
-    "ra_in1k",
-    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118879&authkey=AG98vf1U24xjh4w",  # noqa: E501
-    default=True,
-)
-
-register_pretrained(
-    "efficientnet_b3",
-    "ra2_in1k",
-    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118881&authkey=AJEJzzKVegOaI1Q",  # noqa: E501
-    default=True,
-)
-
-register_pretrained(
-    "efficientnet_b4",
-    "ra2_in1k",
-    url="https://onedrive.live.com/download?cid=A750EE44BB6AE6CF&resid=A750EE44BB6AE6CF%2118886&authkey=AKGpCVHgPtpdGhc",  # noqa: E501
-    default=True,
-)
+def efficientnet_v2_l(**kwargs):
+    block_specs = [
+        BlockSpec(FusedMBConv, 32, 1, 3, 1, 4),
+        BlockSpec(FusedMBConv, 64, 4, 3, 2, 7),
+        BlockSpec(FusedMBConv, 96, 4, 3, 2, 7),
+        BlockSpec(MBConv, 192, 4, 3, 2, 10),
+        BlockSpec(MBConv, 224, 6, 3, 1, 19),
+        BlockSpec(MBConv, 384, 6, 3, 2, 25),
+        BlockSpec(MBConv, 640, 6, 3, 1, 7),
+    ]
+    kwargs.setdefault("drop_rate", 0.4)
+    kwargs.setdefault("norm_epsilon", 1e-3)
+    return EfficientNet(32, block_specs, 1280, **kwargs)

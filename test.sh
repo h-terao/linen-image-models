@@ -1,4 +1,4 @@
 #!/bin/bash
 
 
-python -m pytest limo
+python -m pytest flaxnets

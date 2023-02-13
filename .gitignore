@@ -129,4 +129,4 @@ dmypy.json
 .pyre/
 
 # Checkpoint weights
-*.ckpt
+*.pkl

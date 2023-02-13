@@ -1,75 +1,32 @@
 # Linen Image Models
 
-Linen Image Models (limo) aims to port various image models and their pre-trained weights from timm.
-
-## Design
-
-- Register models from entrypoints
-- Register pretrained params in `registry.py`.
+limo is a easy-to-customize image model implementations with pretrained weights.
+If you add or remove any modules, the pretrained weights will be loaded correctly.
 
 
-## Short example
+## Prerequests
 
-```python
-import jax
-import jax.numpy as jnp
-import jax.random as jr
-import limo
+- jax, jaxlib
+- flax
+- chex
+- einops
+- requests
+- tqdm
 
-model_names = limo.list_models()
-model_name = model_names[-1]  # Select the last model for example.
+In addition, pytests, torch, and torchvision are required to test this project.
 
-# Create a model.
-flax_model, model_cfg = limo.create_model(model_name, pretrained=True)
+## Usage
 
-# Prepare variables.
-variables = flax_model.init(jr.PRNGKey(0), jnp.zeros(model_cfg["input_size"]))
-variables = limo.load_weights(variables, model_name, pretrained=True)
-state, params = variables.pop("params")
-```
+### Create off-the-shelf models
 
-## Policy
+`limo.create_model`
 
-### Easy to use various models with pre-trained weights.
+### Load pretrained parameters.
 
+### Customize models
 
-### Easy to folk and customize models.
+All model implementations are almost self-contained in a Python file, and it is easy to copy and paste model definitions into your project. If you add or remove modules, `limo.load_pretrained` also works well because all implemented modules are manually named, and `limo.load_pretrained` uses their names to determine where to load weights.
 
-In Flax, module insertion, replacing or deleting is very difficult.
-
-
-
-## Example
-
-```python
-import limo
-
-model, cfg = limo.create_model("efficientnet_b0")
-model_names = limo.list_models(pretrained=True)
-# model_names = limo.list_models(pretrained="in12k")
-
-variables = limo.load_weights(variables, "efficientnet_b0", pretrained=True)
-```
-
-
-## Philosophy
-- Easy to use pre-trained model
-- Easy to folk and modify models
-
-## Supported Models
-
-- EfficientNet
-- EfficientNetV2 (experimental)
-- TinyNet
-
-## Modules Overview
-
-### Configuration
-
-Configuration is a core component of `limo`. To switch model behaviour (e.g., training mode, torch-like padding, and half precision training), you must transform functions via `limo.configure`.
-
-If you prefer more pythonic way, use a context manager `limo.using_config`.
-
-### Layers
-
-`limo.layers` provide
+Specifically, you can customize `limo`'s models as follows:
+1. Copy limo/_src/*.py into your project.
+2. Replace the line `from limo import register_model` with `from limo import fake_register_model as register_model` to avoid registration error.

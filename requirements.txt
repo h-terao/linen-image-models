@@ -1,0 +1,5 @@
+flax
+chex
+einops
+requests
+tqdm
