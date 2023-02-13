@@ -32,9 +32,9 @@ class SqueezeExcite(linen.Module):
     @linen.compact
     def __call__(self, x: chex.Array) -> chex.Array:
         h = jnp.mean(x, axis=(-2, -3), keepdims=True)
-        h = self.conv(self.hidden_dim, (1, 1), padding=0, name="fc1")(h)
+        h = self.conv(self.hidden_dim, (1, 1), padding=0, use_bias=True, name="fc1")(h)
         h = self.act(h)
-        h = self.conv(x.shape[-1], (1, 1), padding=0, name="fc2")(h)
+        h = self.conv(x.shape[-1], (1, 1), padding=0, use_bias=True, name="fc2")(h)
         return x * self.scale_act(h)
 
 
@@ -44,9 +44,9 @@ class MBConv(linen.Module):
     kernel_size: int
     stride: int
     drop_path_rate: float
-    conv: ModuleDef  # partial(use_bias=False, dtype)
-    norm: ModuleDef  # partial(use_running_average, dtype, axis_name)
-    squeeze_excite: ModuleDef  # partial(act, dtype)
+    conv: ModuleDef
+    norm: ModuleDef
+    squeeze_excite: ModuleDef
     stochastic_depth: ModuleDef
 
     @linen.compact

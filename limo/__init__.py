@@ -1,4 +1,6 @@
 # flake8: noqa
+__version__ = "0.0.1"
+
 from ._src.constants import IMAGENET_DEFAULT_MEAN
 from ._src.constants import IMAGENET_DEFAULT_STD
 from ._src.constants import IMAGENET_INCEPTION_MEAN

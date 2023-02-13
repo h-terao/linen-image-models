@@ -24,7 +24,7 @@ SEP = "/"
 
 
 class ModelEntry(tp.NamedTuple):
-    name: str
+    model_name: str
     weight_name: str
     family_name: str
     model_fun: ModelFun
@@ -76,9 +76,9 @@ def register_model(
     }
 
     def register(model_fun: ModelFun):
-        name = model_fun.__name__
+        model_name = model_fun.__name__
         new_entry = ModelEntry(
-            name=name,
+            model_name=model_name,
             weight_name=pretrained,
             family_name=family_name,
             model_fun=model_fun,
@@ -86,10 +86,10 @@ def register_model(
             meta=dict(default_meta, **meta),
             defaults=kwargs,
         )
-        _model_registry[name][pretrained] = new_entry
+        _model_registry[model_name][pretrained] = new_entry
         if default:
-            _model_registry[name][False] = new_entry
-            _model_registry[name][True] = new_entry
+            _model_registry[model_name][False] = new_entry
+            _model_registry[model_name][True] = new_entry
         return model_fun
 
     return register
@@ -111,7 +111,7 @@ def fake_register_model(
 
 
 def create_model(
-    name: str, pretrained: bool | str = False, with_meta: bool = False, **kwargs
+    model_name: str, pretrained: bool | str = False, with_meta: bool = False, **kwargs
 ) -> linen.Module | tuple[linen.Module, dict[str, tp.Any]]:
     """Instantiate flax model.
 
@@ -124,28 +124,28 @@ def create_model(
     Returns:
         Model or tuple of model and meta info.
     """
-    assert name in _model_registry, f"The specified model {name} is not registered yet."
+    assert model_name in _model_registry, f"The specified model {model_name} is not registered yet."
 
-    msg = f"The specified pretrained version {pretrained} is not registered yet for {name}."
-    assert pretrained in _model_registry[name], msg
+    msg = f"The specified pretrained version {pretrained} is not registered yet for {model_name}."
+    assert pretrained in _model_registry[model_name], msg
 
-    entry = _model_registry[name][pretrained]
+    entry = _model_registry[model_name][pretrained]
     new_kwargs = dict(entry.defaults, **kwargs)
     model = entry.model_fun(**new_kwargs)
 
     if with_meta:
-        return model, get_model_meta(name, pretrained)
+        return model, get_model_meta(model_name, pretrained)
     else:
         return model
 
 
-def get_model_meta(name: str, pretrained: bool | str = False) -> dict[str, tp.Any]:
-    assert name in _model_registry, f"The specified model {name} is not registered yet."
+def get_model_meta(model_name: str, pretrained: bool | str = False) -> dict[str, tp.Any]:
+    assert model_name in _model_registry, f"The specified model {model_name} is not registered yet."
 
-    msg = f"The specified pretrained version {pretrained} is not registered yet for {name}."
-    assert pretrained in _model_registry[name], msg
+    msg = f"The specified pretrained version {pretrained} is not registered yet for {model_name}."
+    assert pretrained in _model_registry[model_name], msg
 
-    entry = _model_registry[name][pretrained]
+    entry = _model_registry[model_name][pretrained]
     return entry.meta
 
 
@@ -254,10 +254,10 @@ def maybe_overwrite_variables(
 
 
 def download_variables_from_url(
-    name: str, pretrained: str | bool, save_dir: str | None, cache: bool = False
+    model_name: str, pretrained: str | bool, save_dir: str | None, cache: bool = False
 ) -> chex.ArrayTree:
-    entry = _model_registry[name][pretrained]
-    weight_name = f"{name}.{entry.weight_name}.pkl"
+    entry = _model_registry[model_name][pretrained]
+    weight_name = f"{model_name}.{entry.weight_name}.pkl"
 
     if weight_name in _weight_cache:
         return _weight_cache[weight_name]
@@ -297,7 +297,7 @@ def download_variables_from_url(
 
 def load_pretrained(
     variables: chex.ArrayTree,
-    name: str,
+    model_name: str,
     pretrained: str | bool = False,
     module_name: str | None = None,
     save_dir: str | None = None,
@@ -307,7 +307,7 @@ def load_pretrained(
 
     Args:
         variables: Initialized weights.
-        name: Model name.
+        model_name: Model name.
         pretrained: Name of pretrained weights. If True, use default weights.
         module_name: Module name.
         save_dir: Path to the directory to save weights.
@@ -318,7 +318,7 @@ def load_pretrained(
         New weights.
     """
     if pretrained:
-        to_load = download_variables_from_url(name, pretrained, save_dir, cache)
+        to_load = download_variables_from_url(model_name, pretrained, save_dir, cache)
         variables = maybe_overwrite_variables(variables, to_load, module_name)
     return variables
 
