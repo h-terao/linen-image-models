@@ -1,3 +1,4 @@
+"""Training MIMO networks from scratch."""
 from __future__ import annotations
 import typing as tp
 from pathlib import Path
@@ -21,7 +22,7 @@ from absl import app, flags
 
 import resnet_preprocessing
 
-tf.config.set_visible_devices([], "GPU")
+tf.config.set_visible_devices([], "GPU")  # TF should not use GPUs.
 
 flags.DEFINE_string("work_dir", None, "Working directory", short_name="o")
 flags.DEFINE_integer("max_epochs", 150, "Number of training epochs.", short_name="e")
@@ -46,6 +47,8 @@ VERSION = "V1"
 
 
 class TrainState(tp.NamedTuple):
+    """A simple container to hold training state."""
+
     step: int
     rng: chex.PRNGKey
     params: chex.ArrayTree
@@ -128,17 +131,17 @@ def accuracy(inputs, labels, k: int = 1):
 
 
 def initialize(rng, batch) -> TrainState:
-    param_rng, init_rng = jr.split(rng)
+    init_rng, state_rng = jr.split(rng)
     inputs = batch[0][:1]  # only need a sample.
 
     inputs = jnp.concatenate([inputs] * FLAGS.ensemble_size, axis=-1)
-    variables = create_model().init(param_rng, inputs)
+    variables = create_model().init(init_rng, inputs)
     state, params = variables.pop("params")
 
     learning_rate = schedule_lr(step=0)
     return TrainState(
         step=0,
-        rng=init_rng,
+        rng=state_rng,
         params=params,
         state=state,
         opt_state=optax.sgd(learning_rate, momentum=0.9, nesterov=True).init(params),
@@ -267,18 +270,22 @@ def main(_):
     logger = ap.LoggerCollection(ap.ConsoleLogger(), ap.DiskLogger(work_dir_path))
 
     to_save = {"train_state": train_state, "lg_state": logger.state_dict(), "best_score": -1}
-    for epoch in range(FLAGS.max_epochs):
+    if (work_dir_path / "last_state.pkl").exists():
+        to_save = limo.load(work_dir_path / "last_state.pkl")
+
+    start_epoch = int(to_save["train_state"].step) // train_steps_per_epoch
+    for epoch in range(start_epoch, FLAGS.max_epochs):
         to_save["train_state"], summary = train_epoch(
             to_save["train_state"], train_data, train_steps_per_epoch
         )
         summary |= eval_epoch(to_save["train_state"], val_data, val_steps_per_epoch)
-        logger.log_summary(summary, int(train_state.step), epoch)
+        logger.log_summary(summary, int(train_state.step), epoch + 1)
 
         to_save["lg_state"] = logger.state_dict()
         if to_save["best_score"] <= summary["val/accuracy"]:
             to_save["best_score"] = summary["val/accuracy"]
-            limo.save(work_dir_path / "best_state.pkl", to_save)
-        limo.save(work_dir_path / "last_state.pkl", to_save)
+            limo.save(work_dir_path / "best_state.pkl", to_save, exist_ok=True)
+        limo.save(work_dir_path / "last_state.pkl", to_save, exist_ok=True)
 
     # Load best state and save its variables.
     train_state = limo.load(work_dir_path / "best_state.pkl")["train_state"]
@@ -286,6 +293,7 @@ def main(_):
     limo.save(
         work_dir_path / f"IMAGENET1K_MIMO_{FLAGS.ensemble_size}_{VERSION}", variables, exist_ok=True
     )
+
     print("All works done, moi moi (·x·)")
 
 
