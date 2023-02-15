@@ -4,6 +4,7 @@ import typing as tp
 from pathlib import Path
 from functools import partial
 import math
+import time
 
 import jax
 import jax.numpy as jnp
@@ -297,16 +298,30 @@ def main(_):
 
     start_epoch = int(to_save["train_state"].step) // train_steps_per_epoch
     for epoch in range(start_epoch, FLAGS.max_epochs):
+        start_time = time.time()
+
         to_save["train_state"], summary = train_epoch(
             to_save["train_state"],
-            tqdm(train_data, desc=f"Training [Epoch: {epoch}]", total=train_steps_per_epoch),
+            tqdm(
+                train_data,
+                desc=f"Training [Epoch: {epoch}]",
+                total=train_steps_per_epoch,
+                leave=False,
+            ),
             train_steps_per_epoch,
         )
         summary |= eval_epoch(
             to_save["train_state"],
-            tqdm(val_data, desc=f"Validation [Epoch: {epoch}]", total=val_steps_per_epoch),
+            tqdm(
+                val_data,
+                desc=f"Validation [Epoch: {epoch}]",
+                total=val_steps_per_epoch,
+                leave=False,
+            ),
             val_steps_per_epoch,
         )
+
+        summary["elapsed_time"] = (time.time() - start_time) / 60
         logger.log_summary(summary, int(to_save["train_state"].step), epoch + 1)
 
         to_save["lg_state"] = logger.state_dict()
