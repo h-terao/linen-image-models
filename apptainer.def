@@ -1,0 +1,25 @@
+Bootstrap: docker
+From: continuumio/miniconda3
+
+%help
+    This container contains GPU accelerated JAX. In addition, TensorFlow and PyTorch built for
+    CPUs are also installed to use their features such as data loader.
+
+
+%environment
+    export TZ=Asia/Tokyo
+    export PYTHONDONTWRITEBYTECODE=1
+    export XLA_PYTHON_CLIENT_PREALLOCATE=false
+    export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4
+    export HYDRA_FULL_ERROR=1
+
+%post
+    rm -rf /var/lib/apt/lists/*
+    apt-get update && apt-get upgrade -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y tzdata software-properties-common \
+        wget git pkg-config ccache unzip libtcmalloc-minimal4 g++
+
+    CONDA_OVERRIDE_CUDA="11.4" conda install -y \
+        cudatoolkit=11.4.1 cuda-nvcc=11.4.100 tensorflow-cpu \
+        jaxlib=*=*cuda* jax=0.3.21 -c nvidia -c conda-forge -c "nvidia/label/cuda-11.4.1"
+    pip install flax==0.6.4 optax chex einops requests tqdm absl-py git+https://github.com/h-terao/Alopex
