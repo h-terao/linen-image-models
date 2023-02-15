@@ -16,17 +16,18 @@ import limo
 import optax
 import alopex as ap
 import chex
-import deeplake
 import tensorflow as tf
+from tqdm import tqdm
 from absl import app, flags
 
 import resnet_preprocessing
 
 tf.config.set_visible_devices([], "GPU")  # TF should not use GPUs.
 
-flags.DEFINE_string("work_dir", None, "Working directory", short_name="o")
+flags.DEFINE_string("work_dir", "outputs", "Working directory", short_name="o")
+flags.DEFINE_string("data_dir", "../data", "Dataset directory")
 flags.DEFINE_integer("max_epochs", 150, "Number of training epochs.", short_name="e")
-flags.DEFINE_integer("batch_size", 256, "Total batch size.", short_name="b")
+flags.DEFINE_integer("batch_size", 512, "Total batch size.", short_name="b")
 flags.DEFINE_integer("seed", 0, "Random seed.", short_name="s")
 flags.DEFINE_string("model_name", "resnet50", "Model name.")
 flags.DEFINE_integer("ensemble_size", 2, "Ensemble size.")
@@ -42,8 +43,10 @@ FLAGS = flags.FLAGS
 IMAGENET1K_TRAIN_IMAGES = 1281167
 IMAGENET1K_VALID_IMAGES = 50000
 NUM_CLASSES = 1000
-SHUFFLE_BUFFER_SIZE = 32768
+SHUFFLE_BUFFER_SIZE = 65536
 VERSION = "V1"
+
+Batch = tuple[chex.Array, chex.Array]
 
 
 class TrainState(tp.NamedTuple):
@@ -58,13 +61,19 @@ class TrainState(tp.NamedTuple):
 
 
 def create_data():
-    def map_fun(x, is_training: bool = False):
-        image, label = x["images"], x["labels"]  # check.
+    def map_fun(serialized, is_training: bool = False):
+        features = {
+            "image": tf.io.FixedLenFeature([], tf.string),
+            "label": tf.io.FixedLenFeature([], tf.int64),
+            "height": tf.io.FixedLenFeature([], tf.int64),
+            "width": tf.io.FixedLenFeature([], tf.int64),
+        }
 
-        # Transform image.
-        image += tf.zeros(shape=(1, 1, 3), dtype=tf.uint8)  # channel must be three.
-        image = tf.cast(image, tf.float32) / 255.0
-        image = resnet_preprocessing.preprocess_image(image, is_training=is_training)
+        example = tf.io.parse_single_example(serialized, features)
+        image_bytes, label = example["image"], example["label"]  # parse.
+
+        # Decode and transform image.
+        image = resnet_preprocessing.preprocess_image(image_bytes, is_training=is_training)
 
         # Normalize image.
         mean = tf.constant(limo.IMAGENET_DEFAULT_MEAN, dtype=tf.float32, shape=(1, 1, 3))
@@ -72,25 +81,31 @@ def create_data():
         image = (image - mean) / std
 
         # Flatten label.
-        label = label[0]
         return image, label
 
-    train_data = deeplake.load("hub://activeloop/imagenet-train")
+    opts = tf.data.Options()
+    opts.threading.max_intra_op_parallelism = 1
+
+    train_path = Path(FLAGS.data_dir, "ILSVRC2012", "train.tfrecord")
     train_data = (
-        train_data.tensorflow()
+        tf.data.TFRecordDataset(str(train_path))
+        .with_options(opts)
+        .cache()
         .repeat()
+        .shuffle(IMAGENET1K_TRAIN_IMAGES)
         .map(partial(map_fun, is_training=True), num_parallel_calls=tf.data.AUTOTUNE)
-        .shuffle(SHUFFLE_BUFFER_SIZE)
         .batch(FLAGS.batch_size // FLAGS.repetitions, num_parallel_calls=tf.data.AUTOTUNE)
         .prefetch(tf.data.AUTOTUNE)
         .as_numpy_iterator()
     )
 
-    val_data = deeplake.load("hub://activeloop/imagenet-val")
+    val_path = Path(FLAGS.data_dir, "ILSVRC2012", "val.tfrecord")
     val_data = (
-        val_data.tensorflow()
+        tf.data.TFRecordDataset(str(val_path))
+        .with_options(opts)
         .map(partial(map_fun, is_training=False), num_parallel_calls=tf.data.AUTOTUNE)
         .batch(FLAGS.batch_size, num_parallel_calls=tf.data.AUTOTUNE)
+        .cache()
         .repeat()
         .prefetch(tf.data.AUTOTUNE)
         .as_numpy_iterator()
@@ -150,7 +165,7 @@ def initialize(rng, batch) -> TrainState:
 
 
 @partial(ap.train_epoch, axis_name="batch")
-def train_epoch(batch: tuple[chex.Array, chex.Array], train_state: TrainState):
+def train_epoch(train_state: TrainState, batch: Batch):
     # This is step function for training, but transformed to epoch function by `alopex.train_epoch`.
     print("compiling...")
 
@@ -182,12 +197,12 @@ def train_epoch(batch: tuple[chex.Array, chex.Array], train_state: TrainState):
     def loss_fun(params):
         variables = {"params": params, **train_state.state}
         logits, new_state = create_model().apply(
-            variables, inputs, rngs={"dropout": drop_rng}, mutable=True, is_training=True
+            variables, inputs, rngs={"dropout": drop_rng}, mutable="batch_stats", is_training=True
         )
 
         logits = rearrange(logits, "... (M C) -> ... M C", M=FLAGS.ensemble_size)
         ce_loss = jnp.sum(optax.softmax_cross_entropy(logits, labels), axis=-1).mean()
-        l2_loss = sum([jnp.sum(x**2) for x in tree_util.tree_flatten(params) if x.ndim > 1])
+        l2_loss = sum([jnp.sum(x**2) for x in tree_util.tree_leaves(params) if x.ndim > 1])
         loss = ce_loss + FLAGS.weight_decay * l2_loss
 
         metrics = {
@@ -217,7 +232,7 @@ def train_epoch(batch: tuple[chex.Array, chex.Array], train_state: TrainState):
 
     if dynamic_scale:
         new_params, new_state, new_opt_state = tree_util.tree_map(
-            lambda new_x, x: jnp.where(is_fin, new_x, x),
+            partial(jnp.where, is_fin),
             (new_params, new_state, new_opt_state),
             (train_state.params, train_state.state, train_state.opt_state),
         )
@@ -235,8 +250,8 @@ def train_epoch(batch: tuple[chex.Array, chex.Array], train_state: TrainState):
     return new_train_state, metrics
 
 
-@partial(ap.eval_epoch, prefix="val", axis_name="batch")
-def eval_epoch(batch: tuple[chex.Array, chex.Array], train_state: TrainState):
+@partial(ap.eval_epoch, prefix="val/", axis_name="batch")
+def eval_epoch(train_state: TrainState, batch: Batch):
     # This is step function for validation,
     # but transformed to epoch function by `alopex.eval_epoch`.
     inputs, labels = batch
@@ -261,25 +276,38 @@ def main(_):
     work_dir_path = Path(FLAGS.work_dir, FLAGS.model_name)
     work_dir_path.mkdir(parents=True, exist_ok=True)
 
+    # Save flags into text file.
+    config_path = work_dir_path / "flags.txt"
+    if not config_path.exists():
+        FLAGS.append_flags_into_file(str(work_dir_path / "flags.txt"))
+
     train_batch_size = FLAGS.batch_size // FLAGS.repetitions
     train_steps_per_epoch = IMAGENET1K_TRAIN_IMAGES // train_batch_size
     val_steps_per_epoch = math.ceil(IMAGENET1K_VALID_IMAGES / FLAGS.batch_size)
 
-    train_data, val_data = create_data(train_batch_size, FLAGS.batch_size)
+    train_data, val_data = create_data()
     train_state = initialize(jr.PRNGKey(FLAGS.seed), next(train_data))
     logger = ap.LoggerCollection(ap.ConsoleLogger(), ap.DiskLogger(work_dir_path))
 
     to_save = {"train_state": train_state, "lg_state": logger.state_dict(), "best_score": -1}
     if (work_dir_path / "last_state.pkl").exists():
+        print("Previous checkpoint is found. Resume training.")
         to_save = limo.load(work_dir_path / "last_state.pkl")
+        logger.load_state_dict(to_save["lg_state"])
 
     start_epoch = int(to_save["train_state"].step) // train_steps_per_epoch
     for epoch in range(start_epoch, FLAGS.max_epochs):
         to_save["train_state"], summary = train_epoch(
-            to_save["train_state"], train_data, train_steps_per_epoch
+            to_save["train_state"],
+            tqdm(train_data, desc=f"Training [Epoch: {epoch}]", total=train_steps_per_epoch),
+            train_steps_per_epoch,
         )
-        summary |= eval_epoch(to_save["train_state"], val_data, val_steps_per_epoch)
-        logger.log_summary(summary, int(train_state.step), epoch + 1)
+        summary |= eval_epoch(
+            to_save["train_state"],
+            tqdm(val_data, desc=f"Validation [Epoch: {epoch}]", total=val_steps_per_epoch),
+            val_steps_per_epoch,
+        )
+        logger.log_summary(summary, int(to_save["train_state"].step), epoch + 1)
 
         to_save["lg_state"] = logger.state_dict()
         if to_save["best_score"] <= summary["val/accuracy"]:
