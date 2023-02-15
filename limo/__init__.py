@@ -20,6 +20,8 @@ from ._src.helpers import maybe_overwrite_variables
 from ._src.helpers import save
 from ._src.helpers import load
 
+from ._src.alexnet import alexnet
+
 from ._src.resnet import resnet18
 from ._src.resnet import resnet34
 from ._src.resnet import resnet50
