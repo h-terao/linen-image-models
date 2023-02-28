@@ -209,11 +209,6 @@ def maybe_overwrite_variables(
                 checked[new_name] = True
             new_variables[name] = array
 
-        unchecked = [k for k, v in checked.items() if not v]
-        if unchecked:
-            msg = f"The following parameters of PyTorch model are not loaded: {unchecked}."
-            warnings.warn(msg)
-
         new_variables = traverse_util.unflatten_dict(new_variables, sep=SEP)
         return new_variables
 

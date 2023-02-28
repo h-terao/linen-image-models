@@ -47,6 +47,7 @@ def children(m: nn.Module):
 def make_variables_from_torch_model(torch_model: nn.Module) -> tp.Mapping:
     """Parses pytorch module and returns flax-like variables."""
     variables = defaultdict(dict)
+
     for module_type, convert in _converter_registry.items():
         if isinstance(torch_model, module_type):
             state = to_arrays(torch_model.state_dict())
@@ -55,6 +56,9 @@ def make_variables_from_torch_model(torch_model: nn.Module) -> tp.Mapping:
     else:
         # If `torch_model` is not converted, convert all modules.
         named_modules = children(torch_model)
+
+    all_params = {k: v for k, v in torch_model.named_parameters() if "." not in k}
+    variables["params"] = dict(to_arrays(all_params), **variables["params"])
 
     for name, module in named_modules.items():
         # child_variables: {"params": ..., "batch_stats": ...}
@@ -66,9 +70,7 @@ def make_variables_from_torch_model(torch_model: nn.Module) -> tp.Mapping:
     return variables
 
 
-def load_weights_from_torch_model(
-    variables: chex.ArrayTree, torch_model: nn.Module
-) -> chex.ArrayTree:
+def load_weights_from_torch_model(variables: chex.ArrayTree, torch_model: nn.Module) -> chex.ArrayTree:
     # convert PyTorch model and get flatten state.
     to_load = make_variables_from_torch_model(torch_model)
     return maybe_overwrite_variables(variables, to_load)
@@ -145,9 +147,7 @@ def convert_multihead_attention(m, state):
 
     # convert out_proj.
     state = to_arrays(m.out_proj.state_dict())
-    params["out"]["kernel"] = rearrange(
-        state["weight"], "outC (head inC) -> head inC outC", head=m.num_heads
-    )
+    params["out"]["kernel"] = rearrange(state["weight"], "outC (head inC) -> head inC outC", head=m.num_heads)
     if "bias" in state:
         params["out"]["bias"] = state["bias"]
 
@@ -173,7 +173,5 @@ def convert_vision_transformer(m, state):
 
 @register_converter(VisionTransformerEncoder)
 def convert_vision_transformer_encoder(m, state):
-    variables = {
-        "params": {"pos_embedding": rearrange(state["pos_embedding"], "1 time dim -> time dim")}
-    }
+    variables = {"params": {"pos_embedding": rearrange(state["pos_embedding"], "1 time dim -> time dim")}}
     return variables, children(m)
