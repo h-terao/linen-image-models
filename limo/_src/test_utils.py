@@ -44,6 +44,7 @@ def assert_close_outputs(
     torch_model: torch.nn.Module,
     input_size: tuple[int, int, int] = (224, 224, 3),
     batch_size: int = 4,
+    tensor_transpose_axes: tuple[int, ...] | None = (2, 0, 1),
 ) -> None:
     """Initialize variables of `flax_model`,
     and compare the outputs of `flax_model` with that of `torch_model`.
@@ -66,12 +67,17 @@ def assert_close_outputs(
 
         torch_model = torch_model.eval().to(device)
 
-        x = jnp.transpose(x, (0, 3, 1, 2))  # NHWC -> NCHW
+        if tensor_transpose_axes is not None:
+            tensor_transpose_axes = [0] + list(map(lambda x: x + 1, tensor_transpose_axes))
+            x = jnp.transpose(x, tensor_transpose_axes)  # NHWC -> NCHW
+
         x = torch.from_numpy(numpy.array(x)).to(device=device)
         y_torch = torch_model(x)
         y_torch = jnp.array(y_torch.detach().cpu().numpy())
-        if y_torch.ndim == 4:
-            y_torch = jnp.transpose(y_torch, (0, 2, 3, 1))  # NCHW -> NHWC
+
+        if tensor_transpose_axes is not None and y_torch.ndim == 1 + len(input_size):
+            axes = [tensor_transpose_axes.index(x) for x in range(len(tensor_transpose_axes))]
+            y_torch = jnp.transpose(y_torch, axes)  # NCHW -> NHWC
 
     # d = jnp.abs(y_flax - y_torch)
     # msg = f"Average distance: {jnp.mean(d)}, Maximum distance: {jnp.max(d)}"

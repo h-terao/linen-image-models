@@ -10,6 +10,10 @@ from torchvision.models.vision_transformer import (
     VisionTransformer,
     Encoder as VisionTransformerEncoder,
 )
+from torchvision.models.swin_transformer import (
+    ShiftedWindowAttention,
+    ShiftedWindowAttentionV2,
+)
 from jax import tree_util
 import chex
 from einops import rearrange
@@ -47,7 +51,6 @@ def children(m: nn.Module):
 def make_variables_from_torch_model(torch_model: nn.Module) -> tp.Mapping:
     """Parses pytorch module and returns flax-like variables."""
     variables = defaultdict(dict)
-
     for module_type, convert in _converter_registry.items():
         if isinstance(torch_model, module_type):
             state = to_arrays(torch_model.state_dict())
@@ -56,9 +59,6 @@ def make_variables_from_torch_model(torch_model: nn.Module) -> tp.Mapping:
     else:
         # If `torch_model` is not converted, convert all modules.
         named_modules = children(torch_model)
-
-    all_params = {k: v for k, v in torch_model.named_parameters() if "." not in k}
-    variables["params"] = dict(to_arrays(all_params), **variables["params"])
 
     for name, module in named_modules.items():
         # child_variables: {"params": ..., "batch_stats": ...}
@@ -174,4 +174,15 @@ def convert_vision_transformer(m, state):
 @register_converter(VisionTransformerEncoder)
 def convert_vision_transformer_encoder(m, state):
     variables = {"params": {"pos_embedding": rearrange(state["pos_embedding"], "1 time dim -> time dim")}}
+    return variables, children(m)
+
+
+@register_converter(ShiftedWindowAttention)
+def convert_shifted_window_attention(m, state):
+    variables = {}
+    if isinstance(m, ShiftedWindowAttentionV2):
+        variables = {"params": {"logit_scale": state["logit_scale"]}}
+    else:
+        # ShiftedWindowAttentionV2 uses static table.
+        variables = {"params": {"relative_position_bias_table": state["relative_position_bias_table"]}}
     return variables, children(m)

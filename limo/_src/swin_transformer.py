@@ -8,10 +8,8 @@ import math
 import copy
 from functools import partial
 
-import jax
 import jax.numpy as jnp
 from jax.numpy import linalg as LA
-import jax.random as jr
 from flax import linen
 from flax.linen.dtypes import promote_dtype
 from einops import rearrange, reduce
@@ -44,10 +42,11 @@ def _get_relative_position_bias(
     relative_position_index: chex.Array,
     window_size: tuple[int, int],
 ) -> chex.Array:
+
     size = window_size[0] * window_size[1]
     return rearrange(
         relative_position_bias_table[relative_position_index],
-        "(size1 size2) head -> head size1 size2",
+        "(size1 size2) head -> 1 head size1 size2",
         size1=size,
         size2=size,
     )
@@ -147,8 +146,8 @@ def shifted_window_attention(
     q, k, v = rearrange(qkv, "n size (qkv head dim) -> qkv n head size dim", qkv=3, head=num_heads)
     if logit_scale is not None:
         # cosine attention.
-        q = q / LA.norm(q, ord=2, axis=-1, keepdims=True)
-        k = k / LA.norm(k, ord=2, axis=-1, keepdims=True)
+        q = q / jnp.maximum(LA.norm(q, ord=2, axis=-1, keepdims=True), 1e-12)
+        k = k / jnp.maximum(LA.norm(k, ord=2, axis=-1, keepdims=True), 1e-12)
         attn = q @ rearrange(k, "n head size dim -> n head dim size")  # n, head, size, size
         attn = attn * jnp.exp(jnp.minimum(logit_scale, math.log(100)))
     else:
@@ -183,11 +182,13 @@ def shifted_window_attention(
         attn = rearrange(attn, "b n head size1 size2 -> (b n) head size1 size2")
 
     attn = linen.softmax(attn, axis=-1)
-    attn = linen.Dropout(atten_drop_rate)(attn, deterministic)
+    if not deterministic:
+        attn = linen.Dropout(atten_drop_rate)(attn, deterministic)
 
     x = rearrange(attn @ v, "n head size dim -> n size (head dim)")
     x = x @ proj_kernel + proj_bias
-    x = linen.Dropout(drop_rate)(x, deterministic)
+    if not deterministic:
+        x = linen.Dropout(drop_rate)(x, deterministic)
 
     # reverse windows.
     x = rearrange(
@@ -293,8 +294,103 @@ class ShiftedWindowAttention(linen.Module):
 
 
 class ShiftedWindowAttentionV2(linen.Module):
-    # TODO: Implement after ShiftedWindowAttention is tested well.
-    pass
+    window_size: tuple[int, int]
+    shift_size: tuple[int, int]
+    num_heads: int
+    qkv_bias: bool = True
+    proj_bias: bool = True
+    atten_drop_rate: float = 0
+    drop_rate: float = 0
+
+    dtype: chex.ArrayDType | None = None
+    param_dtype: chex.ArrayDType = jnp.float32
+
+    @linen.compact
+    def __call__(self, x, is_training=False):
+        features = x.shape[-1]
+        logit_scale = self.param(
+            "logit_scale",
+            lambda rng, shape, dtype: jnp.log(jnp.full(shape, 10, dtype=dtype)),
+            (self.num_heads, 1, 1),
+            self.param_dtype,
+        )
+
+        # Initialize params.
+        qkv_kernel = self.param(
+            "qkv.kernel",
+            linen.initializers.lecun_normal(),
+            (features, 3 * features),
+            self.param_dtype,
+        )
+
+        qkv_bias = None
+        if self.qkv_bias:
+            qkv_bias = self.param("qkv.bias", linen.initializers.zeros, (3 * features,), self.param_dtype)
+
+        proj_kernel = self.param(
+            "proj.kernel",
+            linen.initializers.lecun_normal(),
+            (features, features),
+            self.param_dtype,
+        )
+
+        proj_bias = None
+        if self.qkv_bias:
+            proj_bias = self.param("proj.bias", linen.initializers.zeros, (features,), self.param_dtype)
+
+        # define relative position bias table.
+        relative_coords_h = jnp.arange(-(self.window_size[0] - 1), self.window_size[0], dtype=self.dtype)
+        relative_coords_w = jnp.arange(-(self.window_size[1] - 1), self.window_size[1], dtype=self.dtype)
+        relative_coords_table = jnp.stack(jnp.meshgrid(relative_coords_h, relative_coords_w, indexing="ij"))
+        relative_coords_table = rearrange(relative_coords_table, "heads h w -> h w heads")
+
+        relative_coords_table = relative_coords_table.at[..., 0].divide(self.window_size[0] - 1)
+        relative_coords_table = relative_coords_table.at[..., 1].divide(self.window_size[1] - 1)
+        relative_coords_table = 8 * relative_coords_table
+
+        relative_coords_table = jnp.sign(relative_coords_table) * jnp.log2(jnp.abs(relative_coords_table) + 1.0) / 3.0
+        relative_coords_table = linen.Dense(512, dtype=self.dtype, name="cpb_mlp.0")(relative_coords_table)
+        relative_coords_table = linen.Dense(self.num_heads, use_bias=False, dtype=self.dtype, name="cpb_mlp.2")(
+            linen.relu(relative_coords_table)
+        )
+        relative_coords_table = rearrange(relative_coords_table, "h w heads -> (h w) heads")
+
+        # relative position index.
+        coords_h = jnp.arange(self.window_size[0])
+        coords_w = jnp.arange(self.window_size[1])
+        coords = jnp.stack(jnp.meshgrid(coords_h, coords_w, indexing="ij"))
+        coords_flatten = rearrange(coords, "n size_h size_w -> n (size_h size_w)")
+        relative_coords = rearrange(
+            coords_flatten[:, :, None] - coords_flatten[:, None, :],
+            "n size1 size2 -> size1 size2 n",
+        )
+        relative_coords = relative_coords.at[:, :, 0].add(self.window_size[0] - 1)
+        relative_coords = relative_coords.at[:, :, 1].add(self.window_size[1] - 1)
+        relative_coords = relative_coords.at[:, :, 0].multiply(2 * self.window_size[1] - 1)
+        relative_position_index = reduce(relative_coords, "size1 size2 n -> (size1 size2)", "sum")
+
+        # Take relative position bias.
+        relative_position_bias = _get_relative_position_bias(
+            relative_coords_table, relative_position_index, self.window_size
+        )
+        relative_position_bias = 16 * linen.sigmoid(relative_position_bias)
+
+        return shifted_window_attention(
+            x,
+            qkv_kernel=qkv_kernel,
+            qkv_bias=qkv_bias,
+            proj_kernel=proj_kernel,
+            proj_bias=proj_bias,
+            relative_position_bias=relative_position_bias,
+            window_size=self.window_size,
+            shift_size=self.shift_size,
+            num_heads=self.num_heads,
+            atten_drop_rate=self.atten_drop_rate,
+            drop_rate=self.drop_rate,
+            logit_scale=logit_scale,
+            dtype=self.dtype,
+            deterministic=not is_training,
+        )
 
 
 class SwinTransformerBlock(linen.Module):
@@ -336,7 +432,48 @@ class SwinTransformerBlock(linen.Module):
         h = self.dense(features, bias_init=bias_init, name="mlp.3")(h)
         h = linen.Dropout(self.drop_rate)(h, not is_training)
         x = x + stochastic_depth(h, not is_training)
+        return x
 
+
+class SwinTransformerBlockV2(linen.Module):
+    num_heads: int
+    window_size: tuple[int, int]
+    shift_size: tuple[int, int]
+    mlp_ratio: float = 4.0
+    drop_rate: float = 0.0
+    atten_drop_rate: float = 0.0
+    drop_path_rate: float = 0
+    dense: ModuleDef = linen.Dense
+    norm: ModuleDef = linen.LayerNorm
+    dtype: chex.ArrayDType = jnp.float32
+
+    @linen.compact
+    def __call__(self, x: chex.Array, is_training: bool = False) -> chex.Array:
+        features = x.shape[-1]
+        stochastic_depth = linen.Dropout(self.drop_path_rate, broadcast_dims=(-1, -2, -3))
+        bias_init = linen.initializers.normal(1e-6)
+
+        # Attention block.
+        h = ShiftedWindowAttentionV2(
+            self.window_size,
+            self.shift_size,
+            self.num_heads,
+            atten_drop_rate=self.atten_drop_rate,
+            drop_rate=self.drop_rate,
+            dtype=self.dtype,
+            name="attn",
+        )(x, is_training)
+        h = self.norm(name="norm1")(h)
+        x = x + stochastic_depth(h, not is_training)
+
+        # MLP block.
+        h = self.dense(int(self.mlp_ratio * features), bias_init=bias_init, name="mlp.0")(x)
+        h = linen.gelu(h, approximate=False)
+        h = linen.Dropout(self.drop_rate)(h, not is_training)
+        h = self.dense(features, bias_init=bias_init, name="mlp.3")(h)
+        h = linen.Dropout(self.drop_rate)(h, not is_training)
+        h = self.norm(name="norm2")(h)
+        x = x + stochastic_depth(h, not is_training)
         return x
 
 
@@ -375,7 +512,7 @@ class SwinTransformer(linen.Module):
             self.hidden_dim,
             self.patch_size,
             strides=self.patch_size,
-            padding="VALID",
+            padding=0,
             dtype=self.dtype,
             name=f"features.{layer_idx}.0",
         )(x)
@@ -389,7 +526,7 @@ class SwinTransformer(linen.Module):
                 x = self.block(
                     num_heads=self.num_heads[i],
                     window_size=self.window_size,
-                    shift_size=[0 if i % 2 == 0 else w // 2 for w in self.window_size],
+                    shift_size=[0 if j % 2 == 0 else w // 2 for w in self.window_size],
                     mlp_ratio=self.mlp_ratio,
                     drop_rate=self.drop_rate,
                     atten_drop_rate=self.atten_drop_rate,
@@ -399,17 +536,16 @@ class SwinTransformer(linen.Module):
                     dtype=self.dtype,
                     name=f"features.{layer_idx}.{j}",
                 )(x, is_training)
-                print("Shape:", x.shape)
                 block_idx += 1
             layer_idx += 1
-            if i + 1 < len(self.depths):
+            if i < len(self.depths) - 1:
                 x = self.downsample(dense, norm, name=f"features.{layer_idx}")(x)
                 layer_idx += 1
 
-        # x = norm(name="norm")(x)
-        # x = reduce(x, "... H W C -> ... C", "mean")
-        # if self.num_classes > 0:
-        #     x = dense(self.num_classes, name="head")(x)
+        x = norm(name="norm")(x)
+        x = reduce(x, "... H W C -> ... C", "mean")
+        if self.num_classes > 0:
+            x = dense(self.num_classes, name="head")(x)
         return x
 
     @property
@@ -473,6 +609,66 @@ def swin_b(**kwargs) -> SwinTransformer:
         num_heads=[4, 8, 16, 32],
         hidden_dim=128,
         window_size=[7, 7],
+        drop_path_rate=0.5,
+        **kwargs,
+    )
+
+
+@register_model(
+    "IMAGENET1K_V1",
+    url=None,
+    meta={"input_size": (224, 224)},
+    default=True,
+)
+def swin_v2_t(**kwargs) -> SwinTransformer:
+    return SwinTransformer(
+        block=SwinTransformerBlockV2,
+        downsample=PatchMergingV2,
+        patch_size=[4, 4],
+        depths=[2, 2, 6, 2],
+        num_heads=[3, 6, 12, 24],
+        hidden_dim=96,
+        window_size=[8, 8],
+        drop_path_rate=0.2,
+        **kwargs,
+    )
+
+
+@register_model(
+    "IMAGENET1K_V1",
+    url=None,
+    meta={"input_size": (224, 224)},
+    default=True,
+)
+def swin_v2_s(**kwargs) -> SwinTransformer:
+    return SwinTransformer(
+        block=SwinTransformerBlockV2,
+        downsample=PatchMergingV2,
+        patch_size=[4, 4],
+        depths=[2, 2, 18, 2],
+        num_heads=[3, 6, 12, 24],
+        hidden_dim=96,
+        window_size=[8, 8],
+        drop_path_rate=0.3,
+        **kwargs,
+    )
+
+
+@register_model(
+    "IMAGENET1K_V1",
+    url=None,
+    meta={"input_size": (224, 224)},
+    default=True,
+)
+def swin_v2_b(**kwargs) -> SwinTransformer:
+    return SwinTransformer(
+        block=SwinTransformerBlockV2,
+        downsample=PatchMergingV2,
+        patch_size=[4, 4],
+        depths=[2, 2, 18, 2],
+        num_heads=[4, 8, 16, 32],
+        hidden_dim=128,
+        window_size=[8, 8],
         drop_path_rate=0.5,
         **kwargs,
     )
