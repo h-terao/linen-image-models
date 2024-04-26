@@ -2,6 +2,9 @@
 
 limo is an easily customizable image model implementation with pre-trained variables. The pre-trained variables are loaded correctly even if you add or remove modules. Currently, this project would like to reimplement `torchvision.models`.
 
+*Due to the limitation of my onedrive storage, pretrained variables are not available now. Sorry!*
+
+
 ## Installation
 
 1. Install JAX for your environment. See details in [the installation guide of JAX](https://github.com/google/jax#installation).
